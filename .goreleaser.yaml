@@ -20,6 +20,10 @@ archives:
   - id: manager
     ids:
       - manager
+    # Fixed, predictable names (rather than GoReleaser's default
+    # "Linux"/"x86_64"-style template) since hardcore-together-deploy's
+    # Dockerfile downloads this asset by constructing the filename itself.
+    name_template: "manager_{{ .Os }}_{{ .Arch }}"
     formats: [tar.gz]
     format_overrides:
       - goos: windows
@@ -34,14 +38,3 @@ changelog:
     exclude:
       - "^test:"
       - "^chore:"
-
-# DOCKER_IMAGE is set by the workflow's releaser job (needs.build.outputs.image_tag,
-# .github/workflows/workflow.yml) since the image itself is built and pushed by the
-# separate build job (docker/build-push-action), not by GoReleaser.
-release:
-  footer: |
-    ## Docker image
-
-    ```
-    docker pull {{ .Env.DOCKER_IMAGE }}
-    ```
