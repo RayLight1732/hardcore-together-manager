@@ -34,6 +34,11 @@ jobs:
         uses: golangci/golangci-lint-action@v6
         with:
           version: latest
+          # go.mod targets go1.25; the prebuilt golangci-lint binary can lag
+          # behind and refuse to run against a newer `go` directive than it
+          # was itself compiled with, so build it from source with the Go
+          # toolchain setup-go just installed instead.
+          install-mode: goinstall
           args: --timeout 3m0s
   test:
     strategy:
