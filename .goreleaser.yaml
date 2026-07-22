@@ -20,6 +20,10 @@ archives:
   - id: manager
     ids:
       - manager
+    # Fixed, predictable names (rather than GoReleaser's default
+    # "Linux"/"x86_64"-style template) since hardcore-together-deploy's
+    # Dockerfile downloads this asset by constructing the filename itself.
+    name_template: "manager_{{ .Os }}_{{ .Arch }}"
     formats: [tar.gz]
     format_overrides:
       - goos: windows
