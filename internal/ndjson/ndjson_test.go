@@ -62,8 +62,12 @@ func TestReceive_MultipleMessagesInOrder(t *testing.T) {
 	client, server := pipe(t)
 
 	go func() {
-		client.Send(readyMsg{Type: "ready", Running: true})
-		client.Send(readyMsg{Type: "running-changed", Running: false})
+		if err := client.Send(readyMsg{Type: "ready", Running: true}); err != nil {
+			t.Error("Send:", err)
+		}
+		if err := client.Send(readyMsg{Type: "running-changed", Running: false}); err != nil {
+			t.Error("Send:", err)
+		}
 	}()
 
 	for _, want := range []string{"ready", "running-changed"} {
@@ -106,7 +110,9 @@ func TestSend_LargeMessage(t *testing.T) {
 	payload := strings.Repeat("x", 200*1024) // well past bufio.Scanner's 64KiB default
 
 	go func() {
-		client.Send(big{Type: "savedata-response", Data: payload})
+		if err := client.Send(big{Type: "savedata-response", Data: payload}); err != nil {
+			t.Error("Send:", err)
+		}
 	}()
 
 	raw, err := server.Receive()
@@ -134,7 +140,9 @@ func TestSend_ConcurrentSendsDoNotInterleave(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				client.Send(readyMsg{Type: "ready", Running: i%2 == 0})
+				if err := client.Send(readyMsg{Type: "ready", Running: i%2 == 0}); err != nil {
+					t.Error("Send:", err)
+				}
 			}()
 		}
 		wg.Wait()

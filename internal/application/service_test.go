@@ -461,7 +461,7 @@ func TestOpMutex_SerializesArchiveRequestAndStart(t *testing.T) {
 	h.svc.deps.Archive = blocking
 
 	go func() {
-		h.svc.HandleArchiveRequest("manualsave", 1)
+		_, _ = h.svc.HandleArchiveRequest("manualsave", 1)
 	}()
 
 	select {
