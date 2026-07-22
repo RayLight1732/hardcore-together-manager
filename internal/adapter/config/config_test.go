@@ -47,16 +47,25 @@ archive:
 	if c.Timeouts.ProcessStopSeconds != DefaultProcessStopSeconds {
 		t.Errorf("ProcessStopSeconds = %d, want default %d", c.Timeouts.ProcessStopSeconds, DefaultProcessStopSeconds)
 	}
+	if c.State.Path != DefaultStatePath {
+		t.Errorf("State.Path = %q, want default %q", c.State.Path, DefaultStatePath)
+	}
+	if c.Hardcore.PidFile != DefaultPidFile {
+		t.Errorf("Hardcore.PidFile = %q, want default %q", c.Hardcore.PidFile, DefaultPidFile)
+	}
 }
 
 func TestLoad_ExplicitValuesOverrideDefaults(t *testing.T) {
 	path := writeTempConfig(t, `
 signalPort: 9001
 gateListenAddr: "0.0.0.0:9000"
+state:
+  path: "./custom-state.json"
 hardcore:
   workDir: "./hardcore"
   startCommand: ["java", "-jar", "server.jar"]
   recordsDir: "custom-records"
+  pidFile: "./custom-hardcore.pid"
 archive:
   dir: "./archive"
 timeouts:
@@ -71,6 +80,12 @@ timeouts:
 	}
 	if c.Hardcore.RecordsDir != "custom-records" {
 		t.Errorf("RecordsDir = %q, want custom-records", c.Hardcore.RecordsDir)
+	}
+	if c.Hardcore.PidFile != "./custom-hardcore.pid" {
+		t.Errorf("PidFile = %q, want ./custom-hardcore.pid", c.Hardcore.PidFile)
+	}
+	if c.State.Path != "./custom-state.json" {
+		t.Errorf("State.Path = %q, want ./custom-state.json", c.State.Path)
 	}
 	if c.Timeouts.EvacuateCompleteSeconds != 5 {
 		t.Errorf("EvacuateCompleteSeconds = %d, want 5", c.Timeouts.EvacuateCompleteSeconds)

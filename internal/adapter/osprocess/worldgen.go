@@ -64,3 +64,18 @@ func (r *Runner) WipeWorld() error {
 	}
 	return nil
 }
+
+// Exists reports whether world/ is present, used by /start（clean無し）to
+// reject with "ワールドが存在しません" (architecture-manager.md 3節・8a節). A
+// thin read-only check, unlike WipeWorld/EnsureHardcoreMode which have
+// side effects.
+func (r *Runner) Exists() (bool, error) {
+	_, err := os.Stat(r.worldDir)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, fmt.Errorf("osprocess: check world exists: %w", err)
+}

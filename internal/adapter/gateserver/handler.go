@@ -22,7 +22,7 @@ type hardcoreReadyMsg struct {
 
 type startMsg struct {
 	Type        string `json:"type"`
-	Force       bool   `json:"force"`
+	Clean       bool   `json:"clean"`
 	RequestedBy string `json:"requestedBy"`
 }
 
@@ -33,8 +33,18 @@ type loadMsg struct {
 	RequestedBy string `json:"requestedBy"`
 }
 
-// rejectedMsg's Type is "start-rejected" or "load-rejected" depending on
-// which request it answers (docs/protocol-gate-manager.md 3.4節).
+type deactivateMsg struct {
+	Type        string `json:"type"`
+	RequestedBy string `json:"requestedBy"`
+}
+
+type deactivateCompleteMsg struct {
+	Type string `json:"type"`
+}
+
+// rejectedMsg's Type is "start-rejected", "load-rejected", or
+// "deactivate-rejected" depending on which request it answers
+// (docs/protocol-gate-manager.md 3.4節).
 type rejectedMsg struct {
 	Type   string `json:"type"`
 	Reason string `json:"reason"`
@@ -108,7 +118,7 @@ func (s *Server) dispatch(conn *ndjson.Conn, raw json.RawMessage) {
 		// waiting for evacuate-complete on this same connection, which the
 		// read loop must stay free to deliver (architecture-manager.md 7節・8節).
 		go func() {
-			if err := s.app.Start(context.Background(), msg.Force, msg.RequestedBy); err != nil {
+			if err := s.app.Start(context.Background(), msg.Clean, msg.RequestedBy); err != nil {
 				s.logf("start: %v", err)
 			}
 		}()
@@ -122,6 +132,18 @@ func (s *Server) dispatch(conn *ndjson.Conn, raw json.RawMessage) {
 		go func() {
 			if err := s.app.Load(context.Background(), msg.Name, msg.Force, msg.RequestedBy); err != nil {
 				s.logf("load: %v", err)
+			}
+		}()
+
+	case "deactivate":
+		var msg deactivateMsg
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			s.logf("unmarshal deactivate: %v", err)
+			return
+		}
+		go func() {
+			if err := s.app.Deactivate(context.Background(), msg.RequestedBy); err != nil {
+				s.logf("deactivate: %v", err)
 			}
 		}()
 

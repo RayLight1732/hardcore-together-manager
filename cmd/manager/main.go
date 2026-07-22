@@ -22,8 +22,8 @@ import (
 	"github.com/RayLight1732/hardcore-together-manager/internal/adapter/config"
 	"github.com/RayLight1732/hardcore-together-manager/internal/adapter/fsarchive"
 	"github.com/RayLight1732/hardcore-together-manager/internal/adapter/fsrecords"
+	"github.com/RayLight1732/hardcore-together-manager/internal/adapter/fsstate"
 	"github.com/RayLight1732/hardcore-together-manager/internal/adapter/gateserver"
-	"github.com/RayLight1732/hardcore-together-manager/internal/adapter/memstate"
 	"github.com/RayLight1732/hardcore-together-manager/internal/adapter/modserver"
 	"github.com/RayLight1732/hardcore-together-manager/internal/adapter/osprocess"
 	"github.com/RayLight1732/hardcore-together-manager/internal/adapter/systemclock"
@@ -46,11 +46,26 @@ func run(configPath string) error {
 	}
 
 	// --- adapters ---
-	state := memstate.New()
-	proc := osprocess.New(cfg.Hardcore.WorkDir, cfg.Hardcore.StartCommand)
+	state, err := fsstate.New(cfg.State.Path)
+	if err != nil {
+		return err
+	}
+	proc := osprocess.New(cfg.Hardcore.WorkDir, cfg.Hardcore.StartCommand, cfg.Hardcore.PidFile)
 	archiveRepo := fsarchive.New(cfg.Archive.Dir, cfg.Hardcore.WorldDir())
 	recordsRepo := fsrecords.New(cfg.Hardcore.RecordsPath())
 	clock := systemclock.Clock{}
+
+	stopTimeout := time.Duration(cfg.Timeouts.ProcessStopSeconds) * time.Second
+
+	// A previous Manager instance that crashed (rather than shutting down
+	// gracefully via SIGTERM) may have left a hardcore process orphaned.
+	// This must complete before the Gate⇔Manager server starts accepting
+	// commands, so a stale orphan is never mistaken for "not running" and
+	// double-started onto the same world/ and port (architecture-manager.md
+	// 3節).
+	if err := proc.ReapOrphan(stopTimeout); err != nil {
+		return fmt.Errorf("reap orphaned hardcore process: %w", err)
+	}
 
 	modAddr := fmt.Sprintf("127.0.0.1:%d", cfg.SignalPort)
 	modSrv := modserver.NewServer(modAddr)
@@ -113,7 +128,6 @@ func run(configPath string) error {
 	// Manager is the parent of the hardcore process (os/exec, spec 1節); on
 	// a clean shutdown, stop it too rather than leave it orphaned with no
 	// supervisor.
-	stopTimeout := time.Duration(cfg.Timeouts.ProcessStopSeconds) * time.Second
 	stopCtx, cancel := context.WithTimeout(context.Background(), stopTimeout+5*time.Second)
 	defer cancel()
 	if err := proc.Stop(stopCtx, stopTimeout); err != nil {

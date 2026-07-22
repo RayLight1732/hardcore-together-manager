@@ -16,21 +16,35 @@ const (
 	DefaultHardcoreReadySeconds    = 120
 	DefaultProcessStopSeconds      = 30
 	DefaultConfigPath              = "./config.yml"
+	DefaultStatePath               = "./state.json"
+	DefaultPidFile                 = "./hardcore.pid"
 )
 
 // Config is the top-level shape of config.yml.
 type Config struct {
 	SignalPort     int      `yaml:"signalPort"`
 	GateListenAddr string   `yaml:"gateListenAddr"`
+	State          State    `yaml:"state"`
 	Hardcore       Hardcore `yaml:"hardcore"`
 	Archive        Archive  `yaml:"archive"`
 	Timeouts       Timeouts `yaml:"timeouts"`
+}
+
+// State configures where Running is persisted across Manager restarts
+// (architecture-manager.md 2節), the fix for the initial /start deadlock.
+type State struct {
+	Path string `yaml:"path"`
 }
 
 type Hardcore struct {
 	WorkDir      string   `yaml:"workDir"`
 	StartCommand []string `yaml:"startCommand"`
 	RecordsDir   string   `yaml:"recordsDir"`
+	// PidFile records the running hardcore child's PID so a freshly
+	// (re)started Manager can detect and terminate an orphan left behind
+	// by a crashed previous instance before accepting any commands
+	// (architecture-manager.md 3節).
+	PidFile string `yaml:"pidFile"`
 }
 
 type Archive struct {
@@ -68,8 +82,14 @@ func Load(path string) (*Config, error) {
 }
 
 func (c *Config) applyDefaults() {
+	if c.State.Path == "" {
+		c.State.Path = DefaultStatePath
+	}
 	if c.Hardcore.RecordsDir == "" {
 		c.Hardcore.RecordsDir = DefaultRecordsDir
+	}
+	if c.Hardcore.PidFile == "" {
+		c.Hardcore.PidFile = DefaultPidFile
 	}
 	if c.Timeouts.EvacuateCompleteSeconds == 0 {
 		c.Timeouts.EvacuateCompleteSeconds = DefaultEvacuateCompleteSeconds
