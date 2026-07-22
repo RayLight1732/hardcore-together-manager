@@ -74,7 +74,11 @@ func testServer(t *testing.T) (*Server, *fakeApplication, func() *ndjson.Conn) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go srv.Serve(ctx, ln)
+	go func() {
+		if err := srv.Serve(ctx, ln); err != nil && ctx.Err() == nil {
+			t.Error("Serve:", err)
+		}
+	}()
 
 	addr := ln.Addr().String()
 	dial := func() *ndjson.Conn {
