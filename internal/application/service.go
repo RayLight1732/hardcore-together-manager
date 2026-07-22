@@ -198,14 +198,6 @@ func (s *ChallengeApplicationService) startClean(ctx context.Context, requestedB
 func (s *ChallengeApplicationService) startResume(ctx context.Context, requestedBy string) error {
 	log.Printf("application: start (resume) requested by %s", requestedBy)
 
-	exists, err := s.deps.World.Exists()
-	if err != nil {
-		return fmt.Errorf("application: check world exists: %w", err)
-	}
-	if !exists {
-		return s.deps.Gate.SendRejected("start-rejected", "ワールドが存在しません")
-	}
-
 	ok, reason := s.deps.State.TryMarkResuming()
 	if !ok {
 		return s.deps.Gate.SendRejected("start-rejected", reason)

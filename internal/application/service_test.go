@@ -389,25 +389,6 @@ func TestStartClean_ReadyTimeoutMarksUnknownButStaysStarting(t *testing.T) {
 }
 
 // --- /start（clean無し） ---
-
-func TestStartResume_RejectsWhenWorldMissing(t *testing.T) {
-	h := newHarness(t)
-	h.world.exists = false
-
-	if err := h.svc.Start(context.Background(), false, "OP"); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if len(h.gate.rejectedCalls) != 1 || h.gate.rejectedCalls[0].kind != "start-rejected" {
-		t.Fatalf("rejectedCalls = %+v", h.gate.rejectedCalls)
-	}
-	if want := "ワールドが存在しません"; h.gate.rejectedCalls[0].reason != want {
-		t.Errorf("reason = %q, want %q", h.gate.rejectedCalls[0].reason, want)
-	}
-	if h.process.startCalls != 0 {
-		t.Error("process must not be started when world is missing")
-	}
-}
-
 func TestStartResume_RejectsWhileAlreadyRunning(t *testing.T) {
 	h := newHarness(t)
 	h.world.exists = true

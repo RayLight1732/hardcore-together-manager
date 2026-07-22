@@ -243,12 +243,6 @@ func TestE2E_StartArchiveLoadShutdown(t *testing.T) {
 		t.Fatalf("state-response = %+v, want {stopped false}", msg)
 	}
 
-	t.Log("/start (clean:false) with no world/ yet: expect rejection")
-	send(t, gateConn, map[string]any{"type": "start", "clean": false, "requestedBy": "e2e"})
-	if msg := recv(t, gateConn); msg["type"] != "start-rejected" || msg["reason"] != "ワールドが存在しません" {
-		t.Fatalf("expected start-rejected(ワールドが存在しません), got %+v", msg)
-	}
-
 	t.Log("/start clean: expect evacuate-request -> hardcore-ready (nothing was running, so evacuate is actually a no-op on Gate's side)")
 	doStartOrLoad(t, gateConn, map[string]any{"type": "start", "clean": true, "requestedBy": "e2e"}, "hardcore-ready")
 
