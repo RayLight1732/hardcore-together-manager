@@ -34,3 +34,14 @@ changelog:
     exclude:
       - "^test:"
       - "^chore:"
+
+# DOCKER_IMAGE is set by the workflow's releaser job (needs.build.outputs.image_tag,
+# .github/workflows/workflow.yml) since the image itself is built and pushed by the
+# separate build job (docker/build-push-action), not by GoReleaser.
+release:
+  footer: |
+    ## Docker image
+
+    ```
+    docker pull {{ .Env.DOCKER_IMAGE }}
+    ```

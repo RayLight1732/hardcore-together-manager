@@ -65,6 +65,7 @@ jobs:
     outputs:
       image: ${{ steps.image-ref.outputs.image }}
       image_latest: ${{ steps.image-ref.outputs.image_latest }}
+      image_tag: ${{ steps.image-ref.outputs.image_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -97,7 +98,9 @@ jobs:
           # version instead of only by commit SHA or :latest.
           TAGS="${IMAGE}"$'\n'"${IMAGE_LATEST}"
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            TAGS="${TAGS}"$'\n'"${{ env.REGISTRY }}/${REPO_LOWER}:${{ github.ref_name }}"
+            IMAGE_TAG=${{ env.REGISTRY }}/${REPO_LOWER}:${{ github.ref_name }}
+            TAGS="${TAGS}"$'\n'"${IMAGE_TAG}"
+            echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
           fi
           {
             echo "tags<<EOF"
@@ -143,3 +146,4 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DOCKER_IMAGE: ${{ needs.build.outputs.image_tag }}
