@@ -1,0 +1,150 @@
+name: Workflow
+on:
+  push:
+  pull_request:
+    types: [ opened, reopened ]
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  docs-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Refresh docs from hardcore-together-docs
+        run: make docs
+
+      - name: Fail if docs/ is out of sync with hardcore-together-docs
+        run: git diff --exit-code docs/
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          # go.mod targets go1.25; the prebuilt golangci-lint binary can lag
+          # behind and refuse to run against a newer `go` directive than it
+          # was itself compiled with, so build it from source with the Go
+          # toolchain setup-go just installed instead.
+          install-mode: goinstall
+          args: --timeout 3m0s
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Go with cache
+        uses: actions/setup-go@v6
+        with:
+          cache: true
+          go-version-file: go.mod
+
+      - name: Test
+        run: make test
+  build:
+    if: ( github.event_name == 'push' && ( github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') ) )
+    needs:
+      - lint
+      - test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image-ref.outputs.image }}
+      image_latest: ${{ steps.image-ref.outputs.image_latest }}
+      image_tag: ${{ steps.image-ref.outputs.image_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create image ref
+        id: image-ref
+        run: |
+          REF=$(git rev-parse --short $GITHUB_SHA)
+          # Registry repository names must be lowercase; github.repository
+          # preserves the owner/repo casing as-is (e.g. RayLight1732/...).
+          REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE=${{ env.REGISTRY }}/${REPO_LOWER}:${REF}
+          IMAGE_LATEST=${{ env.REGISTRY }}/${REPO_LOWER}:latest
+
+          echo "image=${IMAGE}" >> $GITHUB_OUTPUT
+          echo "image_latest=${IMAGE_LATEST}" >> $GITHUB_OUTPUT
+
+          # On a tag push, also tag the image with the tag name itself
+          # (e.g. v1.0.0), so releases are pullable by a human-readable
+          # version instead of only by commit SHA or :latest.
+          TAGS="${IMAGE}"$'\n'"${IMAGE_LATEST}"
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            IMAGE_TAG=${{ env.REGISTRY }}/${REPO_LOWER}:${{ github.ref_name }}
+            TAGS="${TAGS}"$'\n'"${IMAGE_TAG}"
+            echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          fi
+          {
+            echo "tags<<EOF"
+            echo "$TAGS"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+          echo "${IMAGE}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Build and push docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=registry,ref=${{ steps.image-ref.outputs.image_latest }}
+          cache-to: type=inline
+          tags: ${{ steps.image-ref.outputs.tags }}
+  releaser:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs:
+      - build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          cache: true
+          go-version-file: go.mod
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DOCKER_IMAGE: ${{ needs.build.outputs.image_tag }}
