@@ -30,8 +30,9 @@ var _ port.GateNotifier = (*Server)(nil)
 // application.ChallengeApplicationService.
 type Application interface {
 	Snapshot() challenge.State
-	Start(ctx context.Context, force bool, requestedBy string) error
+	Start(ctx context.Context, clean bool, requestedBy string) error
 	Load(ctx context.Context, name string, force bool, requestedBy string) error
+	Deactivate(ctx context.Context, requestedBy string) error
 	SaveData() ([]records.SaveDataEntry, error)
 	Senpan() ([]records.SenpanEntry, error)
 }
@@ -142,14 +143,24 @@ func (s *Server) SendHardcoreReady() error {
 	return conn.Send(hardcoreReadyMsg{Type: "hardcore-ready"})
 }
 
-// SendRejected sends start-rejected or load-rejected (kind must be one of
-// those two strings) with reason.
+// SendRejected sends start-rejected, load-rejected, or deactivate-rejected
+// (kind must be one of those strings) with reason.
 func (s *Server) SendRejected(kind, reason string) error {
 	conn, err := s.currentConn()
 	if err != nil {
 		return err
 	}
 	return conn.Send(rejectedMsg{Type: kind, Reason: reason})
+}
+
+// SendDeactivateComplete notifies Gate that /deactivate's process stop has
+// completed (docs/protocol-gate-manager.md 3.5a節).
+func (s *Server) SendDeactivateComplete() error {
+	conn, err := s.currentConn()
+	if err != nil {
+		return err
+	}
+	return conn.Send(deactivateCompleteMsg{Type: "deactivate-complete"})
 }
 
 func (s *Server) currentConn() (*ndjson.Conn, error) {

@@ -3,11 +3,12 @@ package application
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/RayLight1732/hardcore-together-manager/internal/adapter/memstate"
+	"github.com/RayLight1732/hardcore-together-manager/internal/adapter/fsstate"
 	"github.com/RayLight1732/hardcore-together-manager/internal/domain/challenge"
 	"github.com/RayLight1732/hardcore-together-manager/internal/domain/records"
 )
@@ -23,6 +24,9 @@ type fakeGate struct {
 
 	hardcoreReadyCalls int
 	hardcoreReadyErr   error
+
+	deactivateCompleteCalls int
+	deactivateCompleteErr   error
 
 	rejectedCalls []rejectedCall
 }
@@ -46,6 +50,13 @@ func (f *fakeGate) SendHardcoreReady() error {
 	defer f.mu.Unlock()
 	f.hardcoreReadyCalls++
 	return f.hardcoreReadyErr
+}
+
+func (f *fakeGate) SendDeactivateComplete() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deactivateCompleteCalls++
+	return f.deactivateCompleteErr
 }
 
 func (f *fakeGate) SendRejected(kind, reason string) error {
@@ -78,12 +89,16 @@ type fakeProcess struct {
 	stopErr    error
 	startCalls int
 	stopCalls  int
+	running    bool
 }
 
 func (f *fakeProcess) Start() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.startCalls++
+	if f.startErr == nil {
+		f.running = true
+	}
 	return f.startErr
 }
 
@@ -91,7 +106,16 @@ func (f *fakeProcess) Stop(ctx context.Context, killTimeout time.Duration) error
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stopCalls++
+	if f.stopErr == nil {
+		f.running = false
+	}
 	return f.stopErr
+}
+
+func (f *fakeProcess) IsRunning() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.running
 }
 
 type fakeWorld struct {
@@ -100,6 +124,8 @@ type fakeWorld struct {
 	ensureCalls int
 	wipeErr     error
 	ensureErr   error
+	exists      bool
+	existsErr   error
 	order       *[]string
 }
 
@@ -118,6 +144,12 @@ func (f *fakeWorld) EnsureHardcoreMode() error {
 	defer f.mu.Unlock()
 	f.ensureCalls++
 	return f.ensureErr
+}
+
+func (f *fakeWorld) Exists() (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.exists, f.existsErr
 }
 
 type fakeArchive struct {
@@ -168,7 +200,7 @@ func (f fakeClock) Now() time.Time { return f.now }
 
 type harness struct {
 	svc     *ChallengeApplicationService
-	state   *memstate.Repository
+	state   *fsstate.Repository
 	gate    *fakeGate
 	ready   *fakeReady
 	process *fakeProcess
@@ -180,8 +212,13 @@ type harness struct {
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 
+	state, err := fsstate.New(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("fsstate.New: %v", err)
+	}
+
 	h := &harness{
-		state:   memstate.New(),
+		state:   state,
 		gate:    &fakeGate{},
 		ready:   &fakeReady{running: true},
 		process: &fakeProcess{},
@@ -208,73 +245,75 @@ func newHarness(t *testing.T) *harness {
 	return h
 }
 
-func TestStart_RejectsWhileRunning(t *testing.T) {
+// --- /start clean ---
+
+func TestStartClean_AllowedEvenWhileRunning(t *testing.T) {
 	h := newHarness(t)
 	h.state.MarkReady(true)
+	h.process.running = true
 
-	if err := h.svc.Start(context.Background(), false, "Steve"); err != nil {
-		t.Fatalf("Start returned error (rejection isn't an error return): %v", err)
-	}
-	if len(h.gate.rejectedCalls) != 1 || h.gate.rejectedCalls[0].kind != "start-rejected" {
-		t.Fatalf("rejectedCalls = %+v, want one start-rejected", h.gate.rejectedCalls)
-	}
-	if h.process.startCalls != 0 || h.world.wipeCalls != 0 {
-		t.Error("no process/world operations should happen on a rejected start")
-	}
-	if snap := h.state.Snapshot(); snap.Phase != challenge.PhaseReady || snap.Running != challenge.RunningTrue {
-		t.Fatalf("snapshot after rejection = %+v, want unchanged {ready true}", snap)
-	}
-}
-
-func TestStart_HappyPath(t *testing.T) {
-	h := newHarness(t)
-	h.state.MarkReady(false)
-
-	if err := h.svc.Start(context.Background(), false, "Steve"); err != nil {
+	if err := h.svc.Start(context.Background(), true, "OP"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if len(h.gate.evacuateCalls) != 1 || h.gate.evacuateCalls[0] != "reset" {
-		t.Errorf("evacuateCalls = %v, want [reset]", h.gate.evacuateCalls)
+	if len(h.gate.rejectedCalls) != 0 {
+		t.Fatalf("clean=true must not be rejected while running, got %+v", h.gate.rejectedCalls)
 	}
-	if h.process.stopCalls != 1 {
-		t.Errorf("stopCalls = %d, want 1", h.process.stopCalls)
+	if len(h.gate.evacuateCalls) != 1 || h.gate.evacuateCalls[0] != "force-reset" {
+		t.Errorf("evacuateCalls = %v, want [force-reset]", h.gate.evacuateCalls)
 	}
-	if h.world.wipeCalls != 1 || h.world.ensureCalls != 1 {
-		t.Errorf("wipeCalls=%d ensureCalls=%d, want 1 each", h.world.wipeCalls, h.world.ensureCalls)
-	}
-	if h.process.startCalls != 1 {
-		t.Errorf("startCalls = %d, want 1", h.process.startCalls)
-	}
-	if h.ready.drained != 1 {
-		t.Errorf("DrainReady calls = %d, want 1", h.ready.drained)
+	if h.process.stopCalls != 1 || h.world.wipeCalls != 1 || h.process.startCalls != 1 {
+		t.Errorf("stopCalls=%d wipeCalls=%d startCalls=%d, want 1 each", h.process.stopCalls, h.world.wipeCalls, h.process.startCalls)
 	}
 	if h.gate.hardcoreReadyCalls != 1 {
 		t.Errorf("hardcoreReadyCalls = %d, want 1", h.gate.hardcoreReadyCalls)
 	}
 }
 
-func TestStart_ForceOverridesRunningCheckAndUsesForceReason(t *testing.T) {
+func TestStartClean_SkipsEvacuateWhenAlreadyStopped(t *testing.T) {
 	h := newHarness(t)
-	h.state.MarkReady(true)
+	// Fresh state: {stopped, false} (world/未生成の初回相当).
 
 	if err := h.svc.Start(context.Background(), true, "OP"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if len(h.gate.rejectedCalls) != 0 {
-		t.Fatalf("force=true must not be rejected, got %+v", h.gate.rejectedCalls)
+	if len(h.gate.evacuateCalls) != 0 {
+		t.Errorf("evacuateCalls = %v, want none: nothing was running, evacuate is unnecessary", h.gate.evacuateCalls)
 	}
-	if len(h.gate.evacuateCalls) != 1 || h.gate.evacuateCalls[0] != "force-reset" {
-		t.Errorf("evacuateCalls = %v, want [force-reset]", h.gate.evacuateCalls)
+	if h.process.stopCalls != 0 {
+		t.Errorf("stopCalls = %d, want 0", h.process.stopCalls)
+	}
+	if h.world.wipeCalls != 1 || h.process.startCalls != 1 {
+		t.Errorf("wipeCalls=%d startCalls=%d, want 1 each", h.world.wipeCalls, h.process.startCalls)
+	}
+	if h.gate.hardcoreReadyCalls != 1 {
+		t.Errorf("hardcoreReadyCalls = %d, want 1", h.gate.hardcoreReadyCalls)
 	}
 }
 
-func TestStart_EvacuateFailureRevertsState(t *testing.T) {
+func TestStartClean_RejectsMidTransition(t *testing.T) {
 	h := newHarness(t)
 	h.state.MarkReady(false)
+	if ok, _ := h.state.TryMarkStarting(false); !ok {
+		t.Fatal("setup: expected TryMarkStarting to succeed")
+	}
+	// state is now {starting, unknown}: a real in-flight sequence.
+
+	if err := h.svc.Start(context.Background(), true, "OP"); err != nil {
+		t.Fatalf("Start returned error (rejection isn't an error return): %v", err)
+	}
+	if len(h.gate.rejectedCalls) != 1 || h.gate.rejectedCalls[0].kind != "start-rejected" {
+		t.Fatalf("rejectedCalls = %+v, want one start-rejected", h.gate.rejectedCalls)
+	}
+}
+
+func TestStartClean_EvacuateFailureRevertsState(t *testing.T) {
+	h := newHarness(t)
+	h.state.MarkReady(true)
+	h.process.running = true
 	prior := h.state.Snapshot()
 	h.gate.evacuateErr = errors.New("gate unreachable")
 
-	if err := h.svc.Start(context.Background(), false, "OP"); err == nil {
+	if err := h.svc.Start(context.Background(), true, "OP"); err == nil {
 		t.Fatal("expected an error when evacuate fails")
 	}
 	if h.process.stopCalls != 0 {
@@ -285,12 +324,13 @@ func TestStart_EvacuateFailureRevertsState(t *testing.T) {
 	}
 }
 
-func TestStart_StopFailureMarksUnknownButStaysStarting(t *testing.T) {
+func TestStartClean_StopFailureMarksUnknownButStaysStarting(t *testing.T) {
 	h := newHarness(t)
-	h.state.MarkReady(false)
+	h.state.MarkReady(true)
+	h.process.running = true
 	h.process.stopErr = errors.New("signal failed")
 
-	if err := h.svc.Start(context.Background(), false, "OP"); err == nil {
+	if err := h.svc.Start(context.Background(), true, "OP"); err == nil {
 		t.Fatal("expected an error when stop fails")
 	}
 	snap := h.state.Snapshot()
@@ -302,12 +342,12 @@ func TestStart_StopFailureMarksUnknownButStaysStarting(t *testing.T) {
 	}
 }
 
-func TestStart_PrepareWorldFailureMarksStopped(t *testing.T) {
+func TestStartClean_PrepareWorldFailureMarksStopped(t *testing.T) {
 	h := newHarness(t)
 	h.state.MarkReady(false)
 	h.world.wipeErr = errors.New("disk full")
 
-	if err := h.svc.Start(context.Background(), false, "OP"); err == nil {
+	if err := h.svc.Start(context.Background(), true, "OP"); err == nil {
 		t.Fatal("expected an error when world prep fails")
 	}
 	if h.process.startCalls != 0 {
@@ -318,25 +358,25 @@ func TestStart_PrepareWorldFailureMarksStopped(t *testing.T) {
 	}
 }
 
-func TestStart_ProcessStartFailureMarksStopped(t *testing.T) {
+func TestStartClean_ProcessStartFailureMarksStoppedAndNotRunning(t *testing.T) {
 	h := newHarness(t)
-	h.state.MarkReady(false)
+	h.state.MarkReady(true) // running was true — clean's wipe destroys it regardless
 	h.process.startErr = errors.New("exec: not found")
 
-	if err := h.svc.Start(context.Background(), false, "OP"); err == nil {
+	if err := h.svc.Start(context.Background(), true, "OP"); err == nil {
 		t.Fatal("expected an error when process.Start fails")
 	}
 	if snap := h.state.Snapshot(); snap.Phase != challenge.PhaseStopped || snap.Running != challenge.RunningFalse {
-		t.Fatalf("snapshot = %+v, want {stopped false}", snap)
+		t.Fatalf("snapshot = %+v, want {stopped false} (world was already wiped, so nothing is in progress)", snap)
 	}
 }
 
-func TestStart_ReadyTimeoutMarksUnknownButStaysStarting(t *testing.T) {
+func TestStartClean_ReadyTimeoutMarksUnknownButStaysStarting(t *testing.T) {
 	h := newHarness(t)
 	h.state.MarkReady(false)
 	h.ready.err = context.DeadlineExceeded
 
-	if err := h.svc.Start(context.Background(), false, "OP"); err == nil {
+	if err := h.svc.Start(context.Background(), true, "OP"); err == nil {
 		t.Fatal("expected an error when ready-wait times out")
 	}
 	snap := h.state.Snapshot()
@@ -347,6 +387,100 @@ func TestStart_ReadyTimeoutMarksUnknownButStaysStarting(t *testing.T) {
 		t.Error("hardcore-ready must not be sent if ready-wait failed")
 	}
 }
+
+// --- /start（clean無し） ---
+
+func TestStartResume_RejectsWhenWorldMissing(t *testing.T) {
+	h := newHarness(t)
+	h.world.exists = false
+
+	if err := h.svc.Start(context.Background(), false, "OP"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if len(h.gate.rejectedCalls) != 1 || h.gate.rejectedCalls[0].kind != "start-rejected" {
+		t.Fatalf("rejectedCalls = %+v", h.gate.rejectedCalls)
+	}
+	if want := "ワールドが存在しません"; h.gate.rejectedCalls[0].reason != want {
+		t.Errorf("reason = %q, want %q", h.gate.rejectedCalls[0].reason, want)
+	}
+	if h.process.startCalls != 0 {
+		t.Error("process must not be started when world is missing")
+	}
+}
+
+func TestStartResume_RejectsWhileAlreadyRunning(t *testing.T) {
+	h := newHarness(t)
+	h.world.exists = true
+	h.state.MarkReady(true) // phase=ready: a process is already running
+
+	if err := h.svc.Start(context.Background(), false, "OP"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if len(h.gate.rejectedCalls) != 1 {
+		t.Fatalf("rejectedCalls = %+v", h.gate.rejectedCalls)
+	}
+	if want := "既に起動しています"; h.gate.rejectedCalls[0].reason != want {
+		t.Errorf("reason = %q, want %q", h.gate.rejectedCalls[0].reason, want)
+	}
+}
+
+func TestStartResume_HappyPath_NeverTouchesWorldOrEvacuates(t *testing.T) {
+	h := newHarness(t)
+	h.world.exists = true
+	h.state.SetRunning(true) // an in-progress challenge, process just happens to be stopped (state④)
+
+	if err := h.svc.Start(context.Background(), false, "OP"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if h.world.wipeCalls != 0 || h.world.ensureCalls != 0 {
+		t.Errorf("wipeCalls=%d ensureCalls=%d, want 0 (resume must never touch world/)", h.world.wipeCalls, h.world.ensureCalls)
+	}
+	if len(h.gate.evacuateCalls) != 0 {
+		t.Errorf("evacuateCalls = %v, want none (nothing was running to evacuate from)", h.gate.evacuateCalls)
+	}
+	if h.process.startCalls != 1 {
+		t.Errorf("startCalls = %d, want 1", h.process.startCalls)
+	}
+	if h.gate.hardcoreReadyCalls != 1 {
+		t.Errorf("hardcoreReadyCalls = %d, want 1", h.gate.hardcoreReadyCalls)
+	}
+	// running is whatever the mod reports on ready (h.ready.running=true by
+	// default), reflecting that the challenge picked back up unchanged.
+	if snap := h.state.Snapshot(); snap.Running != challenge.RunningTrue {
+		t.Errorf("running = %v, want true (preserved through resume)", snap.Running)
+	}
+}
+
+func TestStartResume_ProcessStartFailurePreservesRunning(t *testing.T) {
+	h := newHarness(t)
+	h.world.exists = true
+	h.state.SetRunning(true)
+	h.process.startErr = errors.New("exec: not found")
+
+	if err := h.svc.Start(context.Background(), false, "OP"); err == nil {
+		t.Fatal("expected an error when process.Start fails")
+	}
+	if snap := h.state.Snapshot(); snap.Phase != challenge.PhaseStopped || snap.Running != challenge.RunningTrue {
+		t.Fatalf("snapshot = %+v, want {stopped true}: world was never touched, so the in-progress challenge must survive", snap)
+	}
+}
+
+func TestStartResume_MidTransitionRejected(t *testing.T) {
+	h := newHarness(t)
+	h.world.exists = true
+	if ok, _ := h.state.TryMarkResuming(); !ok {
+		t.Fatal("setup: expected TryMarkResuming to succeed")
+	}
+
+	if err := h.svc.Start(context.Background(), false, "OP"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if len(h.gate.rejectedCalls) != 1 || h.gate.rejectedCalls[0].reason != "処理中です。しばらくお待ちください" {
+		t.Fatalf("rejectedCalls = %+v", h.gate.rejectedCalls)
+	}
+}
+
+// --- /load ---
 
 func TestLoad_RejectsWhenArchiveMissing_RevertsState(t *testing.T) {
 	h := newHarness(t)
@@ -447,7 +581,119 @@ func TestLoad_WipesWorldBeforeRestoring(t *testing.T) {
 	}
 }
 
-func TestOpMutex_SerializesArchiveRequestAndStart(t *testing.T) {
+func TestLoad_SkipsEvacuateWhenAlreadyStopped(t *testing.T) {
+	h := newHarness(t)
+	// Fresh state: {stopped, false}.
+	h.archive.exists["save1"] = true
+
+	if err := h.svc.Load(context.Background(), "save1", false, "OP"); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(h.gate.evacuateCalls) != 0 {
+		t.Errorf("evacuateCalls = %v, want none", h.gate.evacuateCalls)
+	}
+	if h.process.stopCalls != 0 {
+		t.Errorf("stopCalls = %d, want 0", h.process.stopCalls)
+	}
+	if h.gate.hardcoreReadyCalls != 1 {
+		t.Errorf("hardcoreReadyCalls = %d, want 1", h.gate.hardcoreReadyCalls)
+	}
+}
+
+// --- /deactivate ---
+
+func TestDeactivate_RejectsWhileStopped(t *testing.T) {
+	h := newHarness(t)
+	// Fresh state: {stopped, false}.
+
+	if err := h.svc.Deactivate(context.Background(), "OP"); err != nil {
+		t.Fatalf("Deactivate: %v", err)
+	}
+	if len(h.gate.rejectedCalls) != 1 || h.gate.rejectedCalls[0].kind != "deactivate-rejected" {
+		t.Fatalf("rejectedCalls = %+v", h.gate.rejectedCalls)
+	}
+	if want := "既に停止しています"; h.gate.rejectedCalls[0].reason != want {
+		t.Errorf("reason = %q, want %q", h.gate.rejectedCalls[0].reason, want)
+	}
+}
+
+func TestDeactivate_RejectsMidTransition(t *testing.T) {
+	h := newHarness(t)
+	h.state.MarkReady(true)
+	if ok, _ := h.state.TryMarkDeactivating(); !ok {
+		t.Fatal("setup: expected TryMarkDeactivating to succeed")
+	}
+
+	if err := h.svc.Deactivate(context.Background(), "OP"); err != nil {
+		t.Fatalf("Deactivate: %v", err)
+	}
+	if len(h.gate.rejectedCalls) != 1 || h.gate.rejectedCalls[0].reason != "処理中です。しばらくお待ちください" {
+		t.Fatalf("rejectedCalls = %+v", h.gate.rejectedCalls)
+	}
+}
+
+func TestDeactivate_HappyPath_PreservesRunning(t *testing.T) {
+	h := newHarness(t)
+	h.state.MarkReady(true)
+	h.process.running = true
+
+	if err := h.svc.Deactivate(context.Background(), "OP"); err != nil {
+		t.Fatalf("Deactivate: %v", err)
+	}
+	if len(h.gate.evacuateCalls) != 1 || h.gate.evacuateCalls[0] != "deactivate" {
+		t.Errorf("evacuateCalls = %v, want [deactivate]", h.gate.evacuateCalls)
+	}
+	if h.process.stopCalls != 1 {
+		t.Errorf("stopCalls = %d, want 1", h.process.stopCalls)
+	}
+	if h.gate.deactivateCompleteCalls != 1 {
+		t.Errorf("deactivateCompleteCalls = %d, want 1", h.gate.deactivateCompleteCalls)
+	}
+	if snap := h.state.Snapshot(); snap.Phase != challenge.PhaseStopped || snap.Running != challenge.RunningTrue {
+		t.Fatalf("snapshot = %+v, want {stopped true} (running preserved)", snap)
+	}
+}
+
+func TestDeactivate_EvacuateFailureRevertsState(t *testing.T) {
+	h := newHarness(t)
+	h.state.MarkReady(true)
+	prior := h.state.Snapshot()
+	h.gate.evacuateErr = errors.New("gate unreachable")
+
+	if err := h.svc.Deactivate(context.Background(), "OP"); err == nil {
+		t.Fatal("expected an error when evacuate fails")
+	}
+	if h.process.stopCalls != 0 {
+		t.Error("process must not be touched if evacuate never completed")
+	}
+	if snap := h.state.Snapshot(); snap != prior {
+		t.Fatalf("snapshot after evacuate failure = %+v, want reverted to %+v", snap, prior)
+	}
+}
+
+func TestDeactivate_StopFailureMarksUnknown(t *testing.T) {
+	h := newHarness(t)
+	h.state.MarkReady(true)
+	h.process.stopErr = errors.New("signal failed")
+
+	if err := h.svc.Deactivate(context.Background(), "OP"); err == nil {
+		t.Fatal("expected an error when stop fails")
+	}
+	snap := h.state.Snapshot()
+	if snap.Phase != challenge.PhaseStopping {
+		t.Errorf("phase = %v, want stopping (stuck until an operator investigates)", snap.Phase)
+	}
+	if snap.Running != challenge.RunningUnknown {
+		t.Errorf("running = %v, want unknown", snap.Running)
+	}
+	if h.gate.deactivateCompleteCalls != 0 {
+		t.Error("deactivate-complete must not be sent if stop failed")
+	}
+}
+
+// --- opMutex ---
+
+func TestOpMutex_SerializesArchiveRequestAndStartClean(t *testing.T) {
 	h := newHarness(t)
 	h.state.MarkReady(false)
 
@@ -472,7 +718,7 @@ func TestOpMutex_SerializesArchiveRequestAndStart(t *testing.T) {
 
 	startDone := make(chan error, 1)
 	go func() {
-		startDone <- h.svc.Start(context.Background(), false, "OP")
+		startDone <- h.svc.Start(context.Background(), true, "OP")
 	}()
 
 	select {
@@ -504,6 +750,8 @@ func (b *blockingArchive) Save(name string, elapsedTime int64, now time.Time) (s
 	return b.fakeArchive.Save(name, elapsedTime, now)
 }
 
+// --- misc handlers ---
+
 func TestHandleReady_UpdatesState(t *testing.T) {
 	h := newHarness(t)
 	h.svc.HandleReady(true)
@@ -521,12 +769,44 @@ func TestHandleRunningChanged_UpdatesRunningOnly(t *testing.T) {
 	}
 }
 
-func TestHandleDisconnect_MarksUnknown(t *testing.T) {
+func TestHandleDisconnect_MarksUnknownWhileProcessAlive(t *testing.T) {
 	h := newHarness(t)
 	h.state.MarkReady(true)
+	h.process.running = true
 	h.svc.HandleDisconnect()
 	if snap := h.state.Snapshot(); snap.Running != challenge.RunningUnknown {
 		t.Fatalf("running = %v, want unknown", snap.Running)
+	}
+}
+
+func TestHandleDisconnect_PreservesRunningWhenProcessDead(t *testing.T) {
+	h := newHarness(t)
+	h.state.MarkReady(true)
+	h.process.running = false // the process itself is gone, only the TCP link dropped is not the case here
+
+	h.svc.HandleDisconnect()
+	if snap := h.state.Snapshot(); snap.Running != challenge.RunningTrue {
+		t.Fatalf("running = %v, want true (unchanged): a dead process can't send a late correction, so unknown would be a permanent false alarm", snap.Running)
+	}
+}
+
+// TestHandleDisconnect_IgnoredMidTransition guards the race fixed above:
+// a disconnect that fires while Deactivate (or Start clean/Load) is
+// already tearing the process down must never clobber the state that
+// operation's own MarkStopped/MarkDeactivated call is about to (or just
+// did) commit — regardless of what Process.IsRunning() happens to read at
+// that instant.
+func TestHandleDisconnect_IgnoredMidTransition(t *testing.T) {
+	h := newHarness(t)
+	h.state.MarkReady(true)
+	if ok, _ := h.state.TryMarkDeactivating(); !ok {
+		t.Fatal("setup: expected TryMarkDeactivating to succeed")
+	}
+	h.process.running = true // still true at the instant the disconnect fires, per the race this guards against
+
+	h.svc.HandleDisconnect()
+	if snap := h.state.Snapshot(); snap.Running != challenge.RunningTrue {
+		t.Fatalf("running = %v, want unchanged true: mid-transition disconnects must be ignored entirely", snap.Running)
 	}
 }
 

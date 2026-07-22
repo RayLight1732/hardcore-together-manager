@@ -14,7 +14,7 @@ import (
 )
 
 type startCall struct {
-	force       bool
+	clean       bool
 	requestedBy string
 }
 
@@ -24,14 +24,19 @@ type loadCall struct {
 	requestedBy string
 }
 
+type deactivateCall struct {
+	requestedBy string
+}
+
 type fakeApplication struct {
 	mu sync.Mutex
 
-	snapshot challenge.State
-	start    []startCall
-	load     []loadCall
-	saveData []records.SaveDataEntry
-	senpan   []records.SenpanEntry
+	snapshot   challenge.State
+	start      []startCall
+	load       []loadCall
+	deactivate []deactivateCall
+	saveData   []records.SaveDataEntry
+	senpan     []records.SenpanEntry
 
 	called chan string
 }
@@ -42,9 +47,9 @@ func newFakeApplication() *fakeApplication {
 
 func (f *fakeApplication) Snapshot() challenge.State { return f.snapshot }
 
-func (f *fakeApplication) Start(ctx context.Context, force bool, requestedBy string) error {
+func (f *fakeApplication) Start(ctx context.Context, clean bool, requestedBy string) error {
 	f.mu.Lock()
-	f.start = append(f.start, startCall{force, requestedBy})
+	f.start = append(f.start, startCall{clean, requestedBy})
 	f.mu.Unlock()
 	f.called <- "start"
 	return nil
@@ -55,6 +60,14 @@ func (f *fakeApplication) Load(ctx context.Context, name string, force bool, req
 	f.load = append(f.load, loadCall{name, force, requestedBy})
 	f.mu.Unlock()
 	f.called <- "load"
+	return nil
+}
+
+func (f *fakeApplication) Deactivate(ctx context.Context, requestedBy string) error {
+	f.mu.Lock()
+	f.deactivate = append(f.deactivate, deactivateCall{requestedBy})
+	f.mu.Unlock()
+	f.called <- "deactivate"
 	return nil
 }
 
@@ -135,7 +148,7 @@ func TestStart_DispatchesToApplication(t *testing.T) {
 	_, app, dial := testServer(t)
 	client := dial()
 
-	if err := client.Send(startMsg{Type: "start", Force: true, RequestedBy: "Steve"}); err != nil {
+	if err := client.Send(startMsg{Type: "start", Clean: true, RequestedBy: "Steve"}); err != nil {
 		t.Fatalf("send start: %v", err)
 	}
 
@@ -147,8 +160,51 @@ func TestStart_DispatchesToApplication(t *testing.T) {
 
 	app.mu.Lock()
 	defer app.mu.Unlock()
-	if len(app.start) != 1 || app.start[0].force != true || app.start[0].requestedBy != "Steve" {
+	if len(app.start) != 1 || app.start[0].clean != true || app.start[0].requestedBy != "Steve" {
 		t.Fatalf("start calls = %+v, want [{true Steve}]", app.start)
+	}
+}
+
+func TestDeactivate_DispatchesToApplication(t *testing.T) {
+	_, app, dial := testServer(t)
+	client := dial()
+
+	if err := client.Send(deactivateMsg{Type: "deactivate", RequestedBy: "Steve"}); err != nil {
+		t.Fatalf("send deactivate: %v", err)
+	}
+
+	select {
+	case <-app.called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("application.Deactivate was never called")
+	}
+
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	if len(app.deactivate) != 1 || app.deactivate[0].requestedBy != "Steve" {
+		t.Fatalf("deactivate calls = %+v, want [{Steve}]", app.deactivate)
+	}
+}
+
+func TestSendDeactivateComplete(t *testing.T) {
+	srv, _, dial := testServer(t)
+	client := dial()
+	waitForConnection(t, srv)
+
+	if err := srv.SendDeactivateComplete(); err != nil {
+		t.Fatalf("SendDeactivateComplete: %v", err)
+	}
+
+	raw, err := client.Receive()
+	if err != nil {
+		t.Fatalf("Receive: %v", err)
+	}
+	typ, err := ndjson.Type(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if typ != "deactivate-complete" {
+		t.Fatalf("type = %q, want deactivate-complete", typ)
 	}
 }
 
@@ -346,6 +402,9 @@ func TestNoActiveConnection_ReturnsError(t *testing.T) {
 		t.Error("expected error with no active connection")
 	}
 	if err := srv.SendRejected("start-rejected", "x"); err == nil {
+		t.Error("expected error with no active connection")
+	}
+	if err := srv.SendDeactivateComplete(); err == nil {
 		t.Error("expected error with no active connection")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)

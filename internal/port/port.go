@@ -15,16 +15,30 @@ import (
 )
 
 // ChallengeStateRepository is the current {phase, running} store
-// (domain/challenge, spec 3.1節). Implemented by adapter/memstate.
+// (domain/challenge, spec 3.1節). Implemented by adapter/fsstate, which
+// additionally persists Running to disk so it survives a Manager restart
+// (architecture-manager.md 2節).
 type ChallengeStateRepository interface {
 	// Snapshot returns the current state, for state-query responses.
 	Snapshot() challenge.State
 
 	// TryMarkStarting atomically applies challenge.DecideStart and, if
 	// allowed, transitions to {starting, unknown} in the same critical
-	// section — see adapter/memstate's doc comment for why this must be
-	// atomic rather than a separate check-then-transition.
+	// section — see adapter/fsstate's doc comment for why this must be
+	// atomic rather than a separate check-then-transition. Used by
+	// /start clean and /load.
 	TryMarkStarting(force bool) (ok bool, rejectReason string)
+
+	// TryMarkResuming atomically applies challenge.DecideResume and, if
+	// allowed, transitions phase to starting (running is left untouched —
+	// /start（clean無し）never looks at it). Used by /start（clean無し）
+	// (architecture-manager.md 8a節).
+	TryMarkResuming() (ok bool, rejectReason string)
+
+	// TryMarkDeactivating atomically applies challenge.DecideDeactivate
+	// and, if allowed, transitions phase to stopping. Used by /deactivate
+	// (architecture-manager.md 8a節).
+	TryMarkDeactivating() (ok bool, rejectReason string)
 
 	// MarkReady transitions to {ready, running} on the hardcore MOD's
 	// `ready` signal (docs/protocol-mod-manager.md 3.1節).
@@ -35,12 +49,20 @@ type ChallengeStateRepository interface {
 	SetRunning(running bool)
 
 	// MarkUnknown sets the running cache to the safe default on
-	// MOD⇔Manager disconnect (docs/protocol-mod-manager.md 5節).
+	// MOD⇔Manager disconnect while the process is still alive
+	// (docs/protocol-mod-manager.md 5節).
 	MarkUnknown()
 
-	// MarkStopped reverts to {stopped, false} — used when a /start·/load
-	// failure leaves Manager certain no process is running.
+	// MarkStopped reverts to {stopped, false} — used when a /start
+	// clean·/load failure leaves Manager certain no process is running
+	// and no challenge is in progress.
 	MarkStopped()
+
+	// MarkDeactivated reverts phase to stopped only, leaving running
+	// untouched — used by /deactivate's success path and /start（clean無し）'s
+	// process-start failure, where the challenge itself (running) never
+	// changed (architecture-manager.md 8a節).
+	MarkDeactivated()
 
 	// Restore overwrites {phase, running} with a previously-taken
 	// State, undoing a TryMarkStarting whose secondary checks (e.g.
@@ -53,6 +75,13 @@ type ChallengeStateRepository interface {
 type ProcessRunner interface {
 	Start() error
 	Stop(ctx context.Context, killTimeout time.Duration) error
+
+	// IsRunning reports whether a process launched by this Runner is
+	// currently alive, distinct from Running (the challenge-in-progress
+	// value): used by HandleDisconnect to tell "the hardcore process
+	// itself died" apart from "only the TCP connection dropped"
+	// (docs/protocol-mod-manager.md 5節).
+	IsRunning() bool
 }
 
 // WorldPreparer prepares world/ and server.properties for a fresh /start or
@@ -64,6 +93,9 @@ type WorldPreparer interface {
 	WipeWorld() error
 	// EnsureHardcoreMode makes sure server.properties has hardcore=true.
 	EnsureHardcoreMode() error
+	// Exists reports whether world/ is present — used by /start（clean無し）
+	// to reject with "ワールドが存在しません" (architecture-manager.md 3節・8a節).
+	Exists() (bool, error)
 }
 
 // ArchiveRepository manages archive/<name>/ (spec 3.2節). Implemented by
@@ -97,6 +129,9 @@ type GateNotifier interface {
 	RequestEvacuate(ctx context.Context, reason string) error
 	SendHardcoreReady() error
 	SendRejected(kind, reason string) error
+	// SendDeactivateComplete notifies Gate that /deactivate's process stop
+	// has completed (docs/protocol-gate-manager.md 3.5a節).
+	SendDeactivateComplete() error
 }
 
 // ReadyWaiter lets application block until the hardcore MOD's `ready`

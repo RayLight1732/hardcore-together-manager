@@ -2,7 +2,7 @@ DOCS_REPO := https://github.com/RayLight1732/hardcore-together-docs.git
 
 all: fmt vet mod lint
 
-# Run tests (-race required: adapter/memstate has a concurrency test, architecture-manager.md 12/13節)
+# Run tests (-race required: adapter/fsstate has a concurrency test, architecture-manager.md 12/13節)
 test: fmt vet
 	go test ./... -race
 
