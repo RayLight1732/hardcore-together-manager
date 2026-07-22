@@ -51,8 +51,9 @@ plugins/hardcoretogether/       Gate側プラグイン（proxy.Plugin実装）
   config.go                       Gate自身の設定ロード（config.ymlのhardcoreTogetherセクション）
   permissions.go                   PermissionsSetupEventの購読、admins判定（0.2節）
   cmd_rta.go                         /rta, /lobby。stateを都度managerclientへ問い合わせる
-  cmd_start.go                        /start, /start force → managerclientへstart委譲
+  cmd_start.go                        /start [clean] → managerclientへstart委譲
   cmd_load.go                          /load <name|latest> [force] → managerclientへload委譲
+  cmd_deactivate.go                     /deactivate → managerclientへdeactivate委譲
   cmd_records.go                        /savedata, /senpan → managerclientへクエリ
   evacuate.go                            EvacuateAll（evacuate-request受信で呼ばれる）、
                                           KickedFromServerEventは購読しない（0.4節の通りconfigのみで対応）
@@ -85,32 +86,36 @@ plugins/hardcoretogether/       Gate側プラグイン（proxy.Plugin実装）
 |---|---|---|---|
 | `/rta` | cmd_rta.go | なし | `managerclient.QueryState`で現在状態を取得し、`Ready`のときのみhardcoreへ接続。それ以外は状態に応じたメッセージ |
 | `/lobby` | cmd_rta.go | なし | 常にlobbyへ接続 |
-| `/start [force]` | cmd_start.go | `hardcoretogether.admin` | `managerclient`へ`start`送信 → `start-rejected`または`evacuate-request`（→退避後は`hardcore-ready`）のいずれかで結果を受ける |
-| `/load <name\|latest> [force]` | cmd_load.go | `hardcoretogether.admin` | `managerclient`へ`load`送信 → 同上 |
+| `/start` | cmd_start.go | `hardcoretogether.admin` | `managerclient`へ`start{clean:false}`送信 → `start-rejected`または`hardcore-ready`のいずれかで結果を受ける（退避は発生しない、`specification.md` 2.1節） |
+| `/start clean` | cmd_start.go | `hardcoretogether.admin` | `managerclient`へ`start{clean:true}`送信 → 常に受理され、`evacuate-request`（→退避後は`hardcore-ready`）で結果を受ける |
+| `/load <name\|latest> [force]` | cmd_load.go | `hardcoretogether.admin` | `managerclient`へ`load`送信 → `load-rejected`または`evacuate-request`（→退避後は`hardcore-ready`）のいずれかで結果を受ける |
+| `/deactivate` | cmd_deactivate.go | `hardcoretogether.admin` | `managerclient`へ`deactivate`送信 → `deactivate-rejected`または`evacuate-request`（→退避後は`deactivate-complete`）のいずれかで結果を受ける |
 | `/savedata` | cmd_records.go | なし | `managerclient`へ`savedata-query`送信、`savedata-response`を整形表示 |
 | `/senpan list\|count` | cmd_records.go | なし | `managerclient`へ`senpan-query`送信、`senpan-response`を整形表示 |
 | `/server` | (Gate組み込み) | `gate.command.server` | 0.1節の通り実装不要 |
 
-各コマンドは`brigodier.LiteralNodeBuilder`を返す関数として組み立て、`p.Command().Register(...)`で登録する（既存の`titlecmd`と同じパターン）。`/start`・`/load`は`managerclient`のコールバック経由で非同期に結果を受け取り、コマンド実行者へ表示する（NDJSON接続は1本の常駐コネクションであり、リクエスト/レスポンスの相関はメッセージ内容や送信順で取る簡易実装で足りる規模）。`/rta`・`/savedata`・`/senpan`は`QueryState`と同様に、送信→対応する応答（`state-response`/`savedata-response`/`senpan-response`）を待つ同期的な呼び出しとして実装できる。
+各コマンドは`brigodier.LiteralNodeBuilder`を返す関数として組み立て、`p.Command().Register(...)`で登録する（既存の`titlecmd`と同じパターン）。`/start`・`/load`・`/deactivate`は`managerclient`のコールバック経由で非同期に結果を受け取り、コマンド実行者へ表示する（NDJSON接続は1本の常駐コネクションであり、リクエスト/レスポンスの相関はメッセージ内容や送信順で取る簡易実装で足りる規模）。`/rta`・`/savedata`・`/senpan`は`QueryState`と同様に、送信→対応する応答（`state-response`/`savedata-response`/`senpan-response`）を待つ同期的な呼び出しとして実装できる。
+
+`cmd_start.go`は`/start`・`/start clean`の両方を1ファイルで扱う（`clean`修飾子の有無を`start`メッセージの`clean`フィールドに渡すだけの違いのため、`cmd_load.go`が`/load <name>`・`/load latest`・`force`修飾子を1ファイルで扱っているのと同じ構造）。`/start`（`clean`無し）は、`specification.md` 2.1節の状態モデル（挑戦の進行状態とhardcoreプロセスの起動状態を独立した2軸として扱う）に基づき、hardcoreプロセスの起動/停止のみを行い`world/`の内容には触れない既定の挙動を持つ。プロセスがクラッシュ等で停止した場合に、進行中の挑戦を破棄せず`/start clean`を使わずに再開する唯一の手段でもある。
 
 ### 2.3 退避設計（`evacuate.go`）
 
-- `EvacuateAll(p *proxy.Proxy, reason string)`：hardcoreサーバーに接続中の全`Player`を列挙し、`CreateConnectionRequest(lobbyServer)`で並行転送。`reason`（`reset`/`force-reset`）によってメッセージ文面を変える
-- `managerclient`が`evacuate-request`を受信したらこの関数を呼び、完了後に`evacuate-complete`をManagerへ送り返す（`docs/protocol-gate-manager.md` 3.5節のハンドシェイク）
+- `EvacuateAll(p *proxy.Proxy, reason string)`：hardcoreサーバーに接続中の全`Player`を列挙し、`CreateConnectionRequest(lobbyServer)`で並行転送。`reason`（`reset`/`force-reset`/`deactivate`）によってメッセージ文面を変える
+- `managerclient`が`evacuate-request`を受信したらこの関数を呼び、完了後に`evacuate-complete`をManagerへ送り返す（`docs/protocol-gate-manager.md` 3.5節のハンドシェイク）。`evacuate-request`は`/start clean`・`/load`・`/deactivate`受理時（かつプロセスが起動中の場合）に送られてくる。`/start`（`clean`無し）は対象状態が常にプロセス停止中のため`evacuate-request`は発生しない（`specification.md` 2.1節・2.3節）
 - 仕様書2.4節（異常切断時の自動lobby復帰）は0.4節の通りGateのconfig設定のみで実現するため、`KickedFromServerEvent`の自前購読は行わない
 
 ### 2.4 自動転送（`transfer.go`）
 
 - `TransferLobbyToHardcore(p *proxy.Proxy)`：その時点でlobbyに接続している全プレイヤーをhardcoreへ接続する
-- `managerclient`が`hardcore-ready`（`/start`・`/load`完了の1回限りの通知）を受信したら呼ぶ
+- `managerclient`が`hardcore-ready`（`/start [clean]`・`/load`完了の1回限りの通知）を受信したら呼ぶ
 
 ### 2.5 `managerclient/`
 
 Gate起動時にManagerへTCP接続し、以後は常駐する（`docs/protocol-gate-manager.md` 1節）。
 
 - 接続失敗・切断時は数回リトライ＋バックオフ
-- `evacuate-request`は`evacuate.go`へ、`hardcore-ready`は`transfer.go`へディスパッチする。`state-response`・`start-rejected`・`load-rejected`・`savedata-response`・`senpan-response`は、対応するリクエストを送った呼び出し元（2.1節・2.2節の同期/非同期呼び出し）へ返す
-- 接続が確立していない間、`/start`・`/load`等のコマンドは「Managerと接続できていません」といったメッセージを即座に返す（Managerへの送信を試みない）
+- `evacuate-request`は`evacuate.go`へ、`hardcore-ready`は`transfer.go`へディスパッチする。`state-response`・`start-rejected`・`load-rejected`・`deactivate-rejected`・`deactivate-complete`・`savedata-response`・`senpan-response`は、対応するリクエストを送った呼び出し元（2.1節・2.2節の同期/非同期呼び出し）へ返す
+- 接続が確立していない間、`/start [clean]`・`/load`・`/deactivate`等のコマンドは「Managerと接続できていません」といったメッセージを即座に返す（Managerへの送信を試みない）
 
 ## 3. Managerとの関係
 
@@ -189,7 +194,7 @@ Gate向けのシグナルを受け付ける疑似Manager TCPサーバー。`mana
 
 ### 7.3 `commands_test.go`（コマンド層）
 
-`command.Manager.Do(ctx, src, "start")`のような低レベルAPIで、実際のMinecraftクライアント接続無しにbrigodierコマンドを実行し、`mockmanager`が受け取ったメッセージ・`command.Source`（自作の`fakeSource`）が受け取った応答メッセージの両方を検証する。対象は`/start`・`/load`・`/savedata`・`/senpan`（いずれも`d.proxy`に触れないコマンド）。パーミッションチェック（`hardcoretogether.admin`）が実際に弾くことも検証する。
+`command.Manager.Do(ctx, src, "start")`のような低レベルAPIで、実際のMinecraftクライアント接続無しにbrigodierコマンドを実行し、`mockmanager`が受け取ったメッセージ・`command.Source`（自作の`fakeSource`）が受け取った応答メッセージの両方を検証する。対象は`/start`・`/start clean`・`/load`・`/deactivate`・`/savedata`・`/senpan`（いずれも`d.proxy`に触れないコマンド）。パーミッションチェック（`hardcoretogether.admin`）が実際に弾くことも検証する。
 
 **対象外（このテスト層では検証しない）**：`/rta`・`/lobby`、および`evacuate.go`・`transfer.go`（`onEvacuateRequest`・`onHardcoreReady`）は、実プレイヤー接続または`*proxy.Proxy`の実インスタンスを必要とするため対象外とした。将来これらを検証したくなった場合は、`proxy.New`で実サーバーを起動せずに`RegisteredServer`だけ登録したテスト用Proxyインスタンスを作れないか、別途調査が必要（未確定事項に追加）。
 
@@ -202,3 +207,4 @@ Gate向けのシグナルを受け付ける疑似Manager TCPサーバー。`mana
 - 再改訂：push型`state`シグナルのローカルキャッシュ（`state_cache.go`）を廃止し、Gateが必要な時にManagerへ同期的に問い合わせる`QueryState`方式へ変更（2.1節）。`/start`・`/load`完了時の自動転送だけは`hardcore-ready`という1回限りの通知として`transfer.go`に切り出した（2.4節）。理由の詳細は`docs/protocol-gate-manager.md` 6節・`specification.md` 9節決定ログ参照
 - 実装：`plugins/hardcoretogether/`一式（`plugin.go`, `config.go`, `permissions.go`, `util.go`, `cmd_*.go`, `evacuate.go`, `transfer.go`, `managerclient/client.go`）を実装し、`gate.go`・`config.yml`に反映。Gate v0.68.26では`Player.ID()`が`go.minekube.com/gate/pkg/util/uuid`型を返すため、`github.com/google/uuid`ではなくそちらを使用
 - テスト追加：`internal/mockmanager`（疑似Manager TCPサーバー）を使ったGo統合テスト（7節）。Docker上に実Managerを立てるe2eテストは別リポジトリのManager実装が無いため今回は見送り、プロトコルドキュメント（`docs/protocol-gate-manager.md`）を正としたモックベースのテストで代替した
+- 設計変更：`/start`にワールドを触らず起動するだけの既定挙動を持たせ、破壊的な再生成は`/start clean`修飾子に分離した。あわせて`/deactivate`コマンドを新設（`cmd_deactivate.go`）。旧設計には、一度もhardcoreを起動したことが無い状態からでも`/start`が永遠に成功しないデッドロックがあった——Managerの`running`キャッシュはhardcore未接続時に安全側で`true`（進行中）扱いになり、`/start`はこれが`true`の間拒否され、キャッシュを書き換えられるのはhardcore自身が起動して`ready`を送った場合のみだが、そのhardcoreを起動させる`/start`自体が拒否され続ける、という循環だった。Manager自身は`os/exec`によるプロセス起動/停止処理を既に実装・E2E確認済みだった（別リポジトリの`hardcore-together-manager`、`docs/architecture-manager.md`参照）ため、起動する主体が無かったわけではなく、`running`キャッシュがオンメモリでManager自身の再起動のたびに無条件`unknown`へリセットされていたことが根本原因だった（`specification.md` 2.1節「背景」・9節決定ログ参照）。当初は`/activate`・`/deactivate`という4コマンド構成を検討したが、「`/start`と`/activate`の役割分担がコマンド名から読み取れない」という指摘を受け、`/start`自体に`clean`修飾子を持たせる3コマンド構成（`/start [clean]`・`/load [force]`・`/deactivate`）に整理し直した。`/start`（`clean`無し）はワールドの中身（`running`値・`world/`）に触れずhardcoreプロセスの起動/停止のみを行う（旧`/activate`相当）。副次的な利点として、`/start`（`clean`無し）の受理条件が「プロセスが既に起動中か」（Managerが`os/exec`で直接把握でき、常に正確）だけになり、`unknown`になりうる`running`値を一切参照しなくなったため、デッドロックが構造的に発生しなくなった。挑戦の状態（存在しない／進行中／終了）×プロセスの状態（起動中／停止中）の組み合わせごとの`/start`・`/start clean`・`/load`・`/deactivate`の挙動は`specification.md` 2.1節に一覧化した。**本リポジトリはGate側の設計のみを対象とするため（3節参照）、Manager側の対応（`start`の`clean`フィールド対応、`deactivate`ハンドラの追加、`running`値の永続化）は`docs/architecture-manager.md`に反映済み——実コードの変更はManager側リポジトリで別途行う必要がある**
