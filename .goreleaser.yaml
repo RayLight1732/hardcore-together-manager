@@ -8,10 +8,12 @@ builds:
     binary: manager
     env:
       - CGO_ENABLED=0
+    # Only linux is tested (CI's test job runs on ubuntu-latest only) and
+    # only linux is actually deployed (hardcore-together-deploy's
+    # manager/Dockerfile downloads manager_linux_<arch>.tar.gz), so don't
+    # release darwin/windows binaries that nothing exercises.
     goos:
       - linux
-      - darwin
-      - windows
     goarch:
       - amd64
       - arm64
@@ -20,14 +22,11 @@ archives:
   - id: manager
     ids:
       - manager
-    # Fixed, predictable names (rather than GoReleaser's default
+    # Fixed, predictable name (rather than GoReleaser's default
     # "Linux"/"x86_64"-style template) since hardcore-together-deploy's
     # Dockerfile downloads this asset by constructing the filename itself.
     name_template: "manager_{{ .Os }}_{{ .Arch }}"
     formats: [tar.gz]
-    format_overrides:
-      - goos: windows
-        formats: [zip]
 
 checksum:
   name_template: checksums.txt
