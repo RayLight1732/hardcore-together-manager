@@ -13,27 +13,37 @@ import (
 	"github.com/RayLight1732/hardcore-together-manager/internal/domain/records"
 )
 
-type rejectedCall struct{ kind, reason string }
+type rejectedCall struct{ requestID, kind, reason string }
+
+type failedCall struct {
+	requestID, kind, reason string
+	recovered               bool
+}
 
 type fakeGate struct {
 	mu sync.Mutex
 
-	evacuateCalls []string
-	evacuateErr   error
-	evacuateDelay time.Duration
+	evacuateCalls     []string
+	evacuateRequestID string
+	evacuateErr       error
+	evacuateDelay     time.Duration
 
-	hardcoreReadyCalls int
-	hardcoreReadyErr   error
+	hardcoreReadyCalls     int
+	hardcoreReadyRequestID string
+	hardcoreReadyErr       error
 
-	deactivateCompleteCalls int
-	deactivateCompleteErr   error
+	deactivateCompleteCalls     int
+	deactivateCompleteRequestID string
+	deactivateCompleteErr       error
 
 	rejectedCalls []rejectedCall
+	failedCalls   []failedCall
 }
 
-func (f *fakeGate) RequestEvacuate(ctx context.Context, reason string) error {
+func (f *fakeGate) RequestEvacuate(ctx context.Context, requestID, reason string) error {
 	f.mu.Lock()
 	f.evacuateCalls = append(f.evacuateCalls, reason)
+	f.evacuateRequestID = requestID
 	f.mu.Unlock()
 	if f.evacuateDelay > 0 {
 		select {
@@ -45,24 +55,33 @@ func (f *fakeGate) RequestEvacuate(ctx context.Context, reason string) error {
 	return f.evacuateErr
 }
 
-func (f *fakeGate) SendHardcoreReady() error {
+func (f *fakeGate) SendHardcoreReady(requestID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.hardcoreReadyCalls++
+	f.hardcoreReadyRequestID = requestID
 	return f.hardcoreReadyErr
 }
 
-func (f *fakeGate) SendDeactivateComplete() error {
+func (f *fakeGate) SendDeactivateComplete(requestID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.deactivateCompleteCalls++
+	f.deactivateCompleteRequestID = requestID
 	return f.deactivateCompleteErr
 }
 
-func (f *fakeGate) SendRejected(kind, reason string) error {
+func (f *fakeGate) SendRejected(requestID, kind, reason string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.rejectedCalls = append(f.rejectedCalls, rejectedCall{kind, reason})
+	f.rejectedCalls = append(f.rejectedCalls, rejectedCall{requestID, kind, reason})
+	return nil
+}
+
+func (f *fakeGate) SendFailed(requestID, kind, reason string, recovered bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failedCalls = append(f.failedCalls, failedCall{requestID, kind, reason, recovered})
 	return nil
 }
 
@@ -71,9 +90,19 @@ type fakeReady struct {
 	running bool
 	err     error
 	drained int
+
+	// beforeReturn, if set, runs just before WaitForReady returns — lets a
+	// test simulate the process crashing sometime during the wait (e.g.
+	// flip a shared fakeProcess.running to false) so that a subsequent
+	// Process.IsRunning() check inside launchAndAwaitReady sees it as
+	// already dead, distinct from "still running, just slow".
+	beforeReturn func()
 }
 
 func (f *fakeReady) WaitForReady(ctx context.Context) (bool, error) {
+	if f.beforeReturn != nil {
+		f.beforeReturn()
+	}
 	return f.running, f.err
 }
 
@@ -245,6 +274,8 @@ func newHarness(t *testing.T) *harness {
 	return h
 }
 
+const testRequestID = "req-1"
+
 // --- /start clean ---
 
 func TestStartClean_AllowedEvenWhileRunning(t *testing.T) {
@@ -252,7 +283,7 @@ func TestStartClean_AllowedEvenWhileRunning(t *testing.T) {
 	h.state.MarkReady(true)
 	h.process.running = true
 
-	if err := h.svc.Start(context.Background(), true, "OP"); err != nil {
+	if err := h.svc.Start(context.Background(), testRequestID, true, "OP"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if len(h.gate.rejectedCalls) != 0 {
@@ -267,13 +298,16 @@ func TestStartClean_AllowedEvenWhileRunning(t *testing.T) {
 	if h.gate.hardcoreReadyCalls != 1 {
 		t.Errorf("hardcoreReadyCalls = %d, want 1", h.gate.hardcoreReadyCalls)
 	}
+	if h.gate.hardcoreReadyRequestID != testRequestID {
+		t.Errorf("hardcoreReadyRequestID = %q, want %q", h.gate.hardcoreReadyRequestID, testRequestID)
+	}
 }
 
 func TestStartClean_SkipsEvacuateWhenAlreadyStopped(t *testing.T) {
 	h := newHarness(t)
 	// Fresh state: {stopped, false} (world/未生成の初回相当).
 
-	if err := h.svc.Start(context.Background(), true, "OP"); err != nil {
+	if err := h.svc.Start(context.Background(), testRequestID, true, "OP"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if len(h.gate.evacuateCalls) != 0 {
@@ -298,11 +332,14 @@ func TestStartClean_RejectsMidTransition(t *testing.T) {
 	}
 	// state is now {starting, unknown}: a real in-flight sequence.
 
-	if err := h.svc.Start(context.Background(), true, "OP"); err != nil {
+	if err := h.svc.Start(context.Background(), testRequestID, true, "OP"); err != nil {
 		t.Fatalf("Start returned error (rejection isn't an error return): %v", err)
 	}
 	if len(h.gate.rejectedCalls) != 1 || h.gate.rejectedCalls[0].kind != "start-rejected" {
 		t.Fatalf("rejectedCalls = %+v, want one start-rejected", h.gate.rejectedCalls)
+	}
+	if h.gate.rejectedCalls[0].requestID != testRequestID {
+		t.Errorf("requestID = %q, want %q", h.gate.rejectedCalls[0].requestID, testRequestID)
 	}
 }
 
@@ -313,7 +350,7 @@ func TestStartClean_EvacuateFailureRevertsState(t *testing.T) {
 	prior := h.state.Snapshot()
 	h.gate.evacuateErr = errors.New("gate unreachable")
 
-	if err := h.svc.Start(context.Background(), true, "OP"); err == nil {
+	if err := h.svc.Start(context.Background(), testRequestID, true, "OP"); err == nil {
 		t.Fatal("expected an error when evacuate fails")
 	}
 	if h.process.stopCalls != 0 {
@@ -322,23 +359,57 @@ func TestStartClean_EvacuateFailureRevertsState(t *testing.T) {
 	if snap := h.state.Snapshot(); snap != prior {
 		t.Fatalf("snapshot after evacuate failure = %+v, want reverted to %+v", snap, prior)
 	}
+	if len(h.gate.failedCalls) != 1 || h.gate.failedCalls[0].kind != "start-failed" || !h.gate.failedCalls[0].recovered {
+		t.Fatalf("failedCalls = %+v, want one start-failed with recovered=true", h.gate.failedCalls)
+	}
 }
 
-func TestStartClean_StopFailureMarksUnknownButStaysStarting(t *testing.T) {
+// TestStartClean_StopFailure_StaysStuckWhileProcessStillRunning covers the
+// recovered=false branch: Process.Stop() fails and IsRunning() still
+// reports true (a live process might still be sharing world/ and the port
+// with anything a new /start would launch), so phase must stay starting —
+// no command, not even clean/force, can escape a mid-transition phase
+// (domain/challenge's guard) — until an operator investigates.
+func TestStartClean_StopFailure_StaysStuckWhileProcessStillRunning(t *testing.T) {
 	h := newHarness(t)
 	h.state.MarkReady(true)
 	h.process.running = true
 	h.process.stopErr = errors.New("signal failed")
 
-	if err := h.svc.Start(context.Background(), true, "OP"); err == nil {
+	if err := h.svc.Start(context.Background(), testRequestID, true, "OP"); err == nil {
 		t.Fatal("expected an error when stop fails")
 	}
 	snap := h.state.Snapshot()
 	if snap.Phase != challenge.PhaseStarting {
-		t.Errorf("phase = %v, want starting (stuck until forced)", snap.Phase)
+		t.Errorf("phase = %v, want starting (stuck until an operator investigates)", snap.Phase)
 	}
 	if snap.Running != challenge.RunningUnknown {
 		t.Errorf("running = %v, want unknown", snap.Running)
+	}
+	if len(h.gate.failedCalls) != 1 || h.gate.failedCalls[0].kind != "start-failed" || h.gate.failedCalls[0].recovered {
+		t.Fatalf("failedCalls = %+v, want one start-failed with recovered=false", h.gate.failedCalls)
+	}
+}
+
+// TestStartClean_StopFailure_RecoversWhenProcessConfirmedDead covers the
+// recovered=true branch: Process.Stop() itself errored, but a follow-up
+// Process.IsRunning() check confirms the process is actually gone, so phase
+// safely returns to stopped and a retry can proceed immediately.
+func TestStartClean_StopFailure_RecoversWhenProcessConfirmedDead(t *testing.T) {
+	h := newHarness(t)
+	h.state.MarkReady(true)
+	h.process.running = false // Stop() errored, but the process is confirmed not running
+	h.process.stopErr = errors.New("signal failed")
+
+	if err := h.svc.Start(context.Background(), testRequestID, true, "OP"); err == nil {
+		t.Fatal("expected an error when stop fails")
+	}
+	snap := h.state.Snapshot()
+	if snap.Phase != challenge.PhaseStopped {
+		t.Errorf("phase = %v, want stopped (confirmed dead, safe to retry)", snap.Phase)
+	}
+	if len(h.gate.failedCalls) != 1 || h.gate.failedCalls[0].kind != "start-failed" || !h.gate.failedCalls[0].recovered {
+		t.Fatalf("failedCalls = %+v, want one start-failed with recovered=true", h.gate.failedCalls)
 	}
 }
 
@@ -347,7 +418,7 @@ func TestStartClean_PrepareWorldFailureMarksStopped(t *testing.T) {
 	h.state.MarkReady(false)
 	h.world.wipeErr = errors.New("disk full")
 
-	if err := h.svc.Start(context.Background(), true, "OP"); err == nil {
+	if err := h.svc.Start(context.Background(), testRequestID, true, "OP"); err == nil {
 		t.Fatal("expected an error when world prep fails")
 	}
 	if h.process.startCalls != 0 {
@@ -356,6 +427,9 @@ func TestStartClean_PrepareWorldFailureMarksStopped(t *testing.T) {
 	if snap := h.state.Snapshot(); snap.Phase != challenge.PhaseStopped || snap.Running != challenge.RunningFalse {
 		t.Fatalf("snapshot = %+v, want {stopped false}", snap)
 	}
+	if len(h.gate.failedCalls) != 1 || !h.gate.failedCalls[0].recovered {
+		t.Fatalf("failedCalls = %+v, want one recovered=true", h.gate.failedCalls)
+	}
 }
 
 func TestStartClean_ProcessStartFailureMarksStoppedAndNotRunning(t *testing.T) {
@@ -363,11 +437,14 @@ func TestStartClean_ProcessStartFailureMarksStoppedAndNotRunning(t *testing.T) {
 	h.state.MarkReady(true) // running was true — clean's wipe destroys it regardless
 	h.process.startErr = errors.New("exec: not found")
 
-	if err := h.svc.Start(context.Background(), true, "OP"); err == nil {
+	if err := h.svc.Start(context.Background(), testRequestID, true, "OP"); err == nil {
 		t.Fatal("expected an error when process.Start fails")
 	}
 	if snap := h.state.Snapshot(); snap.Phase != challenge.PhaseStopped || snap.Running != challenge.RunningFalse {
 		t.Fatalf("snapshot = %+v, want {stopped false} (world was already wiped, so nothing is in progress)", snap)
+	}
+	if len(h.gate.failedCalls) != 1 || !h.gate.failedCalls[0].recovered {
+		t.Fatalf("failedCalls = %+v, want one recovered=true", h.gate.failedCalls)
 	}
 }
 
@@ -376,15 +453,48 @@ func TestStartClean_ReadyTimeoutMarksUnknownButStaysStarting(t *testing.T) {
 	h.state.MarkReady(false)
 	h.ready.err = context.DeadlineExceeded
 
-	if err := h.svc.Start(context.Background(), true, "OP"); err == nil {
+	if err := h.svc.Start(context.Background(), testRequestID, true, "OP"); err == nil {
 		t.Fatal("expected an error when ready-wait times out")
 	}
 	snap := h.state.Snapshot()
+	// process.Start succeeded (fakeProcess marks itself running on a
+	// successful Start), so IsRunning() still reports true here: recovered
+	// must be false and phase must stay starting.
 	if snap.Phase != challenge.PhaseStarting || snap.Running != challenge.RunningUnknown {
 		t.Fatalf("snapshot = %+v, want {starting unknown}", snap)
 	}
 	if h.gate.hardcoreReadyCalls != 0 {
 		t.Error("hardcore-ready must not be sent if ready-wait failed")
+	}
+	if len(h.gate.failedCalls) != 1 || h.gate.failedCalls[0].recovered {
+		t.Fatalf("failedCalls = %+v, want one start-failed with recovered=false", h.gate.failedCalls)
+	}
+}
+
+// TestStartClean_ReadyTimeout_RecoversWhenProcessCrashed covers the
+// recovered=true branch of the ready-timeout path: the process actually
+// crashed sometime after launching (before ever reporting ready), so by
+// the time launchAndAwaitReady checks IsRunning() after the timeout, it's
+// confirmed gone and phase can safely return to stopped.
+func TestStartClean_ReadyTimeout_RecoversWhenProcessCrashed(t *testing.T) {
+	h := newHarness(t)
+	h.state.MarkReady(false)
+	h.ready.err = context.DeadlineExceeded
+	// fakeProcess.Start() (called before WaitForReady) sets running=true
+	// unconditionally on success, so simulating a mid-wait crash requires
+	// flipping it back to false from within WaitForReady itself, not
+	// before Start() is even called.
+	h.ready.beforeReturn = func() { h.process.running = false }
+
+	if err := h.svc.Start(context.Background(), testRequestID, true, "OP"); err == nil {
+		t.Fatal("expected an error when ready-wait times out")
+	}
+	snap := h.state.Snapshot()
+	if snap.Phase != challenge.PhaseStopped {
+		t.Errorf("phase = %v, want stopped (crash confirmed via IsRunning)", snap.Phase)
+	}
+	if len(h.gate.failedCalls) != 1 || !h.gate.failedCalls[0].recovered {
+		t.Fatalf("failedCalls = %+v, want one start-failed with recovered=true", h.gate.failedCalls)
 	}
 }
 
@@ -394,7 +504,7 @@ func TestStartResume_RejectsWhileAlreadyRunning(t *testing.T) {
 	h.world.exists = true
 	h.state.MarkReady(true) // phase=ready: a process is already running
 
-	if err := h.svc.Start(context.Background(), false, "OP"); err != nil {
+	if err := h.svc.Start(context.Background(), testRequestID, false, "OP"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if len(h.gate.rejectedCalls) != 1 {
@@ -410,7 +520,7 @@ func TestStartResume_HappyPath_NeverTouchesWorldOrEvacuates(t *testing.T) {
 	h.world.exists = true
 	h.state.SetRunning(true) // an in-progress challenge, process just happens to be stopped (state④)
 
-	if err := h.svc.Start(context.Background(), false, "OP"); err != nil {
+	if err := h.svc.Start(context.Background(), testRequestID, false, "OP"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if h.world.wipeCalls != 0 || h.world.ensureCalls != 0 {
@@ -438,11 +548,14 @@ func TestStartResume_ProcessStartFailurePreservesRunning(t *testing.T) {
 	h.state.SetRunning(true)
 	h.process.startErr = errors.New("exec: not found")
 
-	if err := h.svc.Start(context.Background(), false, "OP"); err == nil {
+	if err := h.svc.Start(context.Background(), testRequestID, false, "OP"); err == nil {
 		t.Fatal("expected an error when process.Start fails")
 	}
 	if snap := h.state.Snapshot(); snap.Phase != challenge.PhaseStopped || snap.Running != challenge.RunningTrue {
 		t.Fatalf("snapshot = %+v, want {stopped true}: world was never touched, so the in-progress challenge must survive", snap)
+	}
+	if len(h.gate.failedCalls) != 1 || h.gate.failedCalls[0].kind != "start-failed" || !h.gate.failedCalls[0].recovered {
+		t.Fatalf("failedCalls = %+v, want one start-failed with recovered=true", h.gate.failedCalls)
 	}
 }
 
@@ -453,7 +566,7 @@ func TestStartResume_MidTransitionRejected(t *testing.T) {
 		t.Fatal("setup: expected TryMarkResuming to succeed")
 	}
 
-	if err := h.svc.Start(context.Background(), false, "OP"); err != nil {
+	if err := h.svc.Start(context.Background(), testRequestID, false, "OP"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if len(h.gate.rejectedCalls) != 1 || h.gate.rejectedCalls[0].reason != "処理中です。しばらくお待ちください" {
@@ -468,7 +581,7 @@ func TestLoad_RejectsWhenArchiveMissing_RevertsState(t *testing.T) {
 	h.state.MarkReady(false)
 	prior := h.state.Snapshot()
 
-	if err := h.svc.Load(context.Background(), "save1", false, "OP"); err != nil {
+	if err := h.svc.Load(context.Background(), testRequestID, "save1", false, "OP"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if len(h.gate.rejectedCalls) != 1 || h.gate.rejectedCalls[0].kind != "load-rejected" {
@@ -490,7 +603,7 @@ func TestLoad_LatestResolvesAndRestores(t *testing.T) {
 	h.state.MarkReady(false)
 	h.archive.latestName = "newest"
 
-	if err := h.svc.Load(context.Background(), "latest", false, "OP"); err != nil {
+	if err := h.svc.Load(context.Background(), testRequestID, "latest", false, "OP"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if len(h.archive.restoreCalls) != 1 || h.archive.restoreCalls[0] != "newest" {
@@ -503,7 +616,7 @@ func TestLoad_NoArchivesRejectsForLatest(t *testing.T) {
 	h.state.MarkReady(false)
 	h.archive.latestErr = errors.New("no archives")
 
-	if err := h.svc.Load(context.Background(), "latest", false, "OP"); err != nil {
+	if err := h.svc.Load(context.Background(), testRequestID, "latest", false, "OP"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if len(h.gate.rejectedCalls) != 1 || h.gate.rejectedCalls[0].kind != "load-rejected" {
@@ -515,7 +628,7 @@ func TestLoad_RunningCheckTakesPriorityOverArchiveCheck(t *testing.T) {
 	h := newHarness(t)
 	h.state.MarkReady(true) // running=true AND the archive is also missing
 
-	if err := h.svc.Load(context.Background(), "missing", false, "OP"); err != nil {
+	if err := h.svc.Load(context.Background(), testRequestID, "missing", false, "OP"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if len(h.gate.rejectedCalls) != 1 {
@@ -531,7 +644,7 @@ func TestLoad_ExistingArchiveHappyPath(t *testing.T) {
 	h.state.MarkReady(false)
 	h.archive.exists["save1"] = true
 
-	if err := h.svc.Load(context.Background(), "save1", false, "OP"); err != nil {
+	if err := h.svc.Load(context.Background(), testRequestID, "save1", false, "OP"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if len(h.archive.restoreCalls) != 1 || h.archive.restoreCalls[0] != "save1" {
@@ -554,7 +667,7 @@ func TestLoad_WipesWorldBeforeRestoring(t *testing.T) {
 	h.world.order = &order
 	h.archive.order = &order
 
-	if err := h.svc.Load(context.Background(), "save1", false, "OP"); err != nil {
+	if err := h.svc.Load(context.Background(), testRequestID, "save1", false, "OP"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if len(order) != 2 || order[0] != "wipe" || order[1] != "restore" {
@@ -567,7 +680,7 @@ func TestLoad_SkipsEvacuateWhenAlreadyStopped(t *testing.T) {
 	// Fresh state: {stopped, false}.
 	h.archive.exists["save1"] = true
 
-	if err := h.svc.Load(context.Background(), "save1", false, "OP"); err != nil {
+	if err := h.svc.Load(context.Background(), testRequestID, "save1", false, "OP"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if len(h.gate.evacuateCalls) != 0 {
@@ -587,7 +700,7 @@ func TestDeactivate_RejectsWhileStopped(t *testing.T) {
 	h := newHarness(t)
 	// Fresh state: {stopped, false}.
 
-	if err := h.svc.Deactivate(context.Background(), "OP"); err != nil {
+	if err := h.svc.Deactivate(context.Background(), testRequestID, "OP"); err != nil {
 		t.Fatalf("Deactivate: %v", err)
 	}
 	if len(h.gate.rejectedCalls) != 1 || h.gate.rejectedCalls[0].kind != "deactivate-rejected" {
@@ -605,7 +718,7 @@ func TestDeactivate_RejectsMidTransition(t *testing.T) {
 		t.Fatal("setup: expected TryMarkDeactivating to succeed")
 	}
 
-	if err := h.svc.Deactivate(context.Background(), "OP"); err != nil {
+	if err := h.svc.Deactivate(context.Background(), testRequestID, "OP"); err != nil {
 		t.Fatalf("Deactivate: %v", err)
 	}
 	if len(h.gate.rejectedCalls) != 1 || h.gate.rejectedCalls[0].reason != "処理中です。しばらくお待ちください" {
@@ -618,7 +731,7 @@ func TestDeactivate_HappyPath_PreservesRunning(t *testing.T) {
 	h.state.MarkReady(true)
 	h.process.running = true
 
-	if err := h.svc.Deactivate(context.Background(), "OP"); err != nil {
+	if err := h.svc.Deactivate(context.Background(), testRequestID, "OP"); err != nil {
 		t.Fatalf("Deactivate: %v", err)
 	}
 	if len(h.gate.evacuateCalls) != 1 || h.gate.evacuateCalls[0] != "deactivate" {
@@ -629,6 +742,9 @@ func TestDeactivate_HappyPath_PreservesRunning(t *testing.T) {
 	}
 	if h.gate.deactivateCompleteCalls != 1 {
 		t.Errorf("deactivateCompleteCalls = %d, want 1", h.gate.deactivateCompleteCalls)
+	}
+	if h.gate.deactivateCompleteRequestID != testRequestID {
+		t.Errorf("deactivateCompleteRequestID = %q, want %q", h.gate.deactivateCompleteRequestID, testRequestID)
 	}
 	if snap := h.state.Snapshot(); snap.Phase != challenge.PhaseStopped || snap.Running != challenge.RunningTrue {
 		t.Fatalf("snapshot = %+v, want {stopped true} (running preserved)", snap)
@@ -641,7 +757,7 @@ func TestDeactivate_EvacuateFailureRevertsState(t *testing.T) {
 	prior := h.state.Snapshot()
 	h.gate.evacuateErr = errors.New("gate unreachable")
 
-	if err := h.svc.Deactivate(context.Background(), "OP"); err == nil {
+	if err := h.svc.Deactivate(context.Background(), testRequestID, "OP"); err == nil {
 		t.Fatal("expected an error when evacuate fails")
 	}
 	if h.process.stopCalls != 0 {
@@ -650,14 +766,22 @@ func TestDeactivate_EvacuateFailureRevertsState(t *testing.T) {
 	if snap := h.state.Snapshot(); snap != prior {
 		t.Fatalf("snapshot after evacuate failure = %+v, want reverted to %+v", snap, prior)
 	}
+	if len(h.gate.failedCalls) != 1 || h.gate.failedCalls[0].kind != "deactivate-failed" || !h.gate.failedCalls[0].recovered {
+		t.Fatalf("failedCalls = %+v, want one deactivate-failed with recovered=true", h.gate.failedCalls)
+	}
 }
 
-func TestDeactivate_StopFailureMarksUnknown(t *testing.T) {
+// TestDeactivate_StopFailure_StaysStuckWhileProcessStillRunning covers the
+// recovered=false branch: the process is confirmed still alive after a
+// failed Stop(), so phase must stay stopping until an operator
+// investigates (no command can force through a mid-transition phase).
+func TestDeactivate_StopFailure_StaysStuckWhileProcessStillRunning(t *testing.T) {
 	h := newHarness(t)
 	h.state.MarkReady(true)
+	h.process.running = true
 	h.process.stopErr = errors.New("signal failed")
 
-	if err := h.svc.Deactivate(context.Background(), "OP"); err == nil {
+	if err := h.svc.Deactivate(context.Background(), testRequestID, "OP"); err == nil {
 		t.Fatal("expected an error when stop fails")
 	}
 	snap := h.state.Snapshot()
@@ -669,6 +793,30 @@ func TestDeactivate_StopFailureMarksUnknown(t *testing.T) {
 	}
 	if h.gate.deactivateCompleteCalls != 0 {
 		t.Error("deactivate-complete must not be sent if stop failed")
+	}
+	if len(h.gate.failedCalls) != 1 || h.gate.failedCalls[0].kind != "deactivate-failed" || h.gate.failedCalls[0].recovered {
+		t.Fatalf("failedCalls = %+v, want one deactivate-failed with recovered=false", h.gate.failedCalls)
+	}
+}
+
+// TestDeactivate_StopFailure_RecoversWhenProcessConfirmedDead covers the
+// recovered=true branch: Stop() itself errored, but IsRunning() confirms
+// the process is actually gone, so phase safely returns to stopped.
+func TestDeactivate_StopFailure_RecoversWhenProcessConfirmedDead(t *testing.T) {
+	h := newHarness(t)
+	h.state.MarkReady(true)
+	h.process.running = false // confirmed not running despite Stop() erroring
+	h.process.stopErr = errors.New("signal failed")
+
+	if err := h.svc.Deactivate(context.Background(), testRequestID, "OP"); err == nil {
+		t.Fatal("expected an error when stop fails")
+	}
+	snap := h.state.Snapshot()
+	if snap.Phase != challenge.PhaseStopped {
+		t.Errorf("phase = %v, want stopped (confirmed dead, safe to retry)", snap.Phase)
+	}
+	if len(h.gate.failedCalls) != 1 || h.gate.failedCalls[0].kind != "deactivate-failed" || !h.gate.failedCalls[0].recovered {
+		t.Fatalf("failedCalls = %+v, want one deactivate-failed with recovered=true", h.gate.failedCalls)
 	}
 }
 
@@ -699,7 +847,7 @@ func TestOpMutex_SerializesArchiveRequestAndStartClean(t *testing.T) {
 
 	startDone := make(chan error, 1)
 	go func() {
-		startDone <- h.svc.Start(context.Background(), true, "OP")
+		startDone <- h.svc.Start(context.Background(), testRequestID, true, "OP")
 	}()
 
 	select {
@@ -807,7 +955,7 @@ func TestHandleArchiveRequest_DelegatesToArchiveRepository(t *testing.T) {
 func TestSnapshot(t *testing.T) {
 	h := newHarness(t)
 	h.state.MarkReady(true)
-	if got := h.svc.Snapshot(); got.Phase != challenge.PhaseReady || got.Running != challenge.RunningTrue {
+	if got := h.svc.Snapshot(testRequestID); got.Phase != challenge.PhaseReady || got.Running != challenge.RunningTrue {
 		t.Fatalf("Snapshot() = %+v", got)
 	}
 }
@@ -817,7 +965,7 @@ func TestSaveData_AggregatesRecords(t *testing.T) {
 	h.records.all = []records.ChallengeRecord{
 		{ChallengeID: "A", Events: []records.Event{{Type: records.EventClear}}},
 	}
-	got, err := h.svc.SaveData()
+	got, err := h.svc.SaveData(testRequestID)
 	if err != nil {
 		t.Fatalf("SaveData: %v", err)
 	}
@@ -833,7 +981,7 @@ func TestSenpan_AggregatesRecords(t *testing.T) {
 			{Type: records.EventDeath, DeadPlayer: &records.PlayerRef{UUID: "u1", Name: "Steve"}},
 		}},
 	}
-	got, err := h.svc.Senpan()
+	got, err := h.svc.Senpan(testRequestID)
 	if err != nil {
 		t.Fatalf("Senpan: %v", err)
 	}

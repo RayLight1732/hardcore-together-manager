@@ -27,14 +27,17 @@ import (
 var _ port.GateNotifier = (*Server)(nil)
 
 // Application is what gateserver needs from
-// application.ChallengeApplicationService.
+// application.ChallengeApplicationService. Every method takes requestID —
+// the UUID Gate attached to the request being served — uniformly, whether
+// or not that particular method happens to need it internally
+// (docs/protocol-gate-manager.md 1節, architecture-manager.md 7節).
 type Application interface {
-	Snapshot() challenge.State
-	Start(ctx context.Context, clean bool, requestedBy string) error
-	Load(ctx context.Context, name string, force bool, requestedBy string) error
-	Deactivate(ctx context.Context, requestedBy string) error
-	SaveData() ([]records.SaveDataEntry, error)
-	Senpan() ([]records.SenpanEntry, error)
+	Snapshot(requestID string) challenge.State
+	Start(ctx context.Context, requestID string, clean bool, requestedBy string) error
+	Load(ctx context.Context, requestID string, name string, force bool, requestedBy string) error
+	Deactivate(ctx context.Context, requestID string, requestedBy string) error
+	SaveData(requestID string) ([]records.SaveDataEntry, error)
+	Senpan(requestID string) ([]records.SenpanEntry, error)
 }
 
 // Server holds exactly one active Gate connection at a time (there is only
@@ -110,7 +113,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 // (architecture-manager.md 8節 step 4). Any stale, previously-unconsumed
 // evacuate-complete is discarded first so a late arrival from an
 // already-abandoned cycle can't be mistaken for this one.
-func (s *Server) RequestEvacuate(ctx context.Context, reason string) error {
+func (s *Server) RequestEvacuate(ctx context.Context, requestID, reason string) error {
 	conn, err := s.currentConn()
 	if err != nil {
 		return err
@@ -121,7 +124,7 @@ func (s *Server) RequestEvacuate(ctx context.Context, reason string) error {
 	default:
 	}
 
-	if err := conn.Send(evacuateRequestMsg{Type: "evacuate-request", Reason: reason}); err != nil {
+	if err := conn.Send(evacuateRequestMsg{Type: "evacuate-request", RequestID: requestID, Reason: reason}); err != nil {
 		return fmt.Errorf("gateserver: send evacuate-request: %w", err)
 	}
 
@@ -135,32 +138,42 @@ func (s *Server) RequestEvacuate(ctx context.Context, reason string) error {
 
 // SendHardcoreReady notifies Gate that /start·/load has completed
 // (architecture-manager.md 8節 step 9).
-func (s *Server) SendHardcoreReady() error {
+func (s *Server) SendHardcoreReady(requestID string) error {
 	conn, err := s.currentConn()
 	if err != nil {
 		return err
 	}
-	return conn.Send(hardcoreReadyMsg{Type: "hardcore-ready"})
+	return conn.Send(hardcoreReadyMsg{Type: "hardcore-ready", RequestID: requestID})
 }
 
 // SendRejected sends start-rejected, load-rejected, or deactivate-rejected
 // (kind must be one of those strings) with reason.
-func (s *Server) SendRejected(kind, reason string) error {
+func (s *Server) SendRejected(requestID, kind, reason string) error {
 	conn, err := s.currentConn()
 	if err != nil {
 		return err
 	}
-	return conn.Send(rejectedMsg{Type: kind, Reason: reason})
+	return conn.Send(rejectedMsg{Type: kind, RequestID: requestID, Reason: reason})
 }
 
 // SendDeactivateComplete notifies Gate that /deactivate's process stop has
 // completed (docs/protocol-gate-manager.md 3.5a節).
-func (s *Server) SendDeactivateComplete() error {
+func (s *Server) SendDeactivateComplete(requestID string) error {
 	conn, err := s.currentConn()
 	if err != nil {
 		return err
 	}
-	return conn.Send(deactivateCompleteMsg{Type: "deactivate-complete"})
+	return conn.Send(deactivateCompleteMsg{Type: "deactivate-complete", RequestID: requestID})
+}
+
+// SendFailed notifies Gate that an accepted start/load/deactivate failed
+// partway through (docs/protocol-gate-manager.md 3.5b節).
+func (s *Server) SendFailed(requestID, kind, reason string, recovered bool) error {
+	conn, err := s.currentConn()
+	if err != nil {
+		return err
+	}
+	return conn.Send(failedMsg{Type: kind, RequestID: requestID, Reason: reason, Recovered: recovered})
 }
 
 func (s *Server) currentConn() (*ndjson.Conn, error) {

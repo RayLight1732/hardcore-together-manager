@@ -10,24 +10,33 @@ import (
 	"github.com/RayLight1732/hardcore-together-manager/internal/ndjson"
 )
 
+type stateQueryMsg struct {
+	Type      string `json:"type"`
+	RequestID string `json:"requestId"`
+}
+
 type stateResponseMsg struct {
-	Type    string `json:"type"`
-	State   string `json:"state"`
-	Running string `json:"running"`
+	Type      string `json:"type"`
+	RequestID string `json:"requestId"`
+	State     string `json:"state"`
+	Running   string `json:"running"`
 }
 
 type hardcoreReadyMsg struct {
-	Type string `json:"type"`
+	Type      string `json:"type"`
+	RequestID string `json:"requestId"`
 }
 
 type startMsg struct {
 	Type        string `json:"type"`
+	RequestID   string `json:"requestId"`
 	Clean       bool   `json:"clean"`
 	RequestedBy string `json:"requestedBy"`
 }
 
 type loadMsg struct {
 	Type        string `json:"type"`
+	RequestID   string `json:"requestId"`
 	Name        string `json:"name"`
 	Force       bool   `json:"force"`
 	RequestedBy string `json:"requestedBy"`
@@ -35,40 +44,71 @@ type loadMsg struct {
 
 type deactivateMsg struct {
 	Type        string `json:"type"`
+	RequestID   string `json:"requestId"`
 	RequestedBy string `json:"requestedBy"`
 }
 
 type deactivateCompleteMsg struct {
-	Type string `json:"type"`
+	Type      string `json:"type"`
+	RequestID string `json:"requestId"`
 }
 
 // rejectedMsg's Type is "start-rejected", "load-rejected", or
 // "deactivate-rejected" depending on which request it answers
 // (docs/protocol-gate-manager.md 3.4節).
 type rejectedMsg struct {
-	Type   string `json:"type"`
-	Reason string `json:"reason"`
+	Type      string `json:"type"`
+	RequestID string `json:"requestId"`
+	Reason    string `json:"reason"`
+}
+
+// failedMsg's Type is "start-failed", "load-failed", or "deactivate-failed"
+// depending on which request it answers (docs/protocol-gate-manager.md 3.5b節).
+type failedMsg struct {
+	Type      string `json:"type"`
+	RequestID string `json:"requestId"`
+	Reason    string `json:"reason"`
+	Recovered bool   `json:"recovered"`
 }
 
 type evacuateRequestMsg struct {
-	Type   string `json:"type"`
-	Reason string `json:"reason"`
+	Type      string `json:"type"`
+	RequestID string `json:"requestId"`
+	Reason    string `json:"reason"`
+}
+
+// evacuateCompleteMsg is only ever read for its RequestID (kept for
+// protocol completeness/logging); correlation with the RequestEvacuate call
+// it answers still relies on there only ever being one in-flight
+// start/load/deactivate sequence at a time (evacuateCompleteCh), not on
+// matching this value (docs/protocol-gate-manager.md 3.5節).
+type evacuateCompleteMsg struct {
+	Type      string `json:"type"`
+	RequestID string `json:"requestId"`
+}
+
+type savedataQueryMsg struct {
+	Type      string `json:"type"`
+	RequestID string `json:"requestId"`
 }
 
 type senpanQueryMsg struct {
-	Type string `json:"type"`
-	Mode string `json:"mode"`
+	Type      string `json:"type"`
+	RequestID string `json:"requestId"`
+	Mode      string `json:"mode"`
 }
 
 type savedataResponseMsg struct {
-	Type   string                  `json:"type"`
-	Events []records.SaveDataEntry `json:"events"`
+	Type      string                  `json:"type"`
+	RequestID string                  `json:"requestId"`
+	Events    []records.SaveDataEntry `json:"events"`
 }
 
 type senpanResponseMsg struct {
-	Type    string                `json:"type"`
-	Mode    string                `json:"mode"`
-	Entries []records.SenpanEntry `json:"entries"`
+	Type      string                `json:"type"`
+	RequestID string                `json:"requestId"`
+	Mode      string                `json:"mode"`
+	Entries   []records.SenpanEntry `json:"entries"`
 }
 
 // handleConn owns one Gate connection end to end: adopted as current on
@@ -102,8 +142,13 @@ func (s *Server) dispatch(conn *ndjson.Conn, raw json.RawMessage) {
 
 	switch typ {
 	case "state-query":
-		snap := s.app.Snapshot()
-		resp := stateResponseMsg{Type: "state-response", State: string(snap.Phase), Running: string(snap.Running)}
+		var msg stateQueryMsg
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			s.logf("unmarshal state-query: %v", err)
+			return
+		}
+		snap := s.app.Snapshot(msg.RequestID)
+		resp := stateResponseMsg{Type: "state-response", RequestID: msg.RequestID, State: string(snap.Phase), Running: string(snap.Running)}
 		if err := conn.Send(resp); err != nil {
 			s.logf("send state-response: %v", err)
 		}
@@ -118,7 +163,7 @@ func (s *Server) dispatch(conn *ndjson.Conn, raw json.RawMessage) {
 		// waiting for evacuate-complete on this same connection, which the
 		// read loop must stay free to deliver (architecture-manager.md 7節・8節).
 		go func() {
-			if err := s.app.Start(context.Background(), msg.Clean, msg.RequestedBy); err != nil {
+			if err := s.app.Start(context.Background(), msg.RequestID, msg.Clean, msg.RequestedBy); err != nil {
 				s.logf("start: %v", err)
 			}
 		}()
@@ -130,7 +175,7 @@ func (s *Server) dispatch(conn *ndjson.Conn, raw json.RawMessage) {
 			return
 		}
 		go func() {
-			if err := s.app.Load(context.Background(), msg.Name, msg.Force, msg.RequestedBy); err != nil {
+			if err := s.app.Load(context.Background(), msg.RequestID, msg.Name, msg.Force, msg.RequestedBy); err != nil {
 				s.logf("load: %v", err)
 			}
 		}()
@@ -142,7 +187,7 @@ func (s *Server) dispatch(conn *ndjson.Conn, raw json.RawMessage) {
 			return
 		}
 		go func() {
-			if err := s.app.Deactivate(context.Background(), msg.RequestedBy); err != nil {
+			if err := s.app.Deactivate(context.Background(), msg.RequestID, msg.RequestedBy); err != nil {
 				s.logf("deactivate: %v", err)
 			}
 		}()
@@ -154,12 +199,17 @@ func (s *Server) dispatch(conn *ndjson.Conn, raw json.RawMessage) {
 		}
 
 	case "savedata-query":
-		entries, err := s.app.SaveData()
+		var msg savedataQueryMsg
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			s.logf("unmarshal savedata-query: %v", err)
+			return
+		}
+		entries, err := s.app.SaveData(msg.RequestID)
 		if err != nil {
 			s.logf("savedata: %v", err)
 			entries = []records.SaveDataEntry{}
 		}
-		if err := conn.Send(savedataResponseMsg{Type: "savedata-response", Events: entries}); err != nil {
+		if err := conn.Send(savedataResponseMsg{Type: "savedata-response", RequestID: msg.RequestID, Events: entries}); err != nil {
 			s.logf("send savedata-response: %v", err)
 		}
 
@@ -169,12 +219,12 @@ func (s *Server) dispatch(conn *ndjson.Conn, raw json.RawMessage) {
 			s.logf("unmarshal senpan-query: %v", err)
 			return
 		}
-		entries, err := s.app.Senpan()
+		entries, err := s.app.Senpan(msg.RequestID)
 		if err != nil {
 			s.logf("senpan: %v", err)
 			entries = []records.SenpanEntry{}
 		}
-		resp := senpanResponseMsg{Type: "senpan-response", Mode: msg.Mode, Entries: entries}
+		resp := senpanResponseMsg{Type: "senpan-response", RequestID: msg.RequestID, Mode: msg.Mode, Entries: entries}
 		if err := conn.Send(resp); err != nil {
 			s.logf("send senpan-response: %v", err)
 		}

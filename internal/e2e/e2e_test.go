@@ -82,21 +82,42 @@ func recv(t *testing.T, conn *ndjson.Conn) map[string]any {
 }
 
 // doStartOrLoad sends req (a start/load/deactivate message already
-// accepted, i.e. not expected to be rejected) and drives the
-// evacuate-request/complete handshake through to the given terminal
-// message type (architecture-manager.md 8節・8a節).
-func doStartOrLoad(t *testing.T, conn *ndjson.Conn, req any, terminal string) {
+// accepted, i.e. not expected to be rejected) tagged with requestID, and
+// drives the evacuate-request/complete handshake through to the given
+// terminal message type (architecture-manager.md 8節・8a節). Every message
+// along the way — evacuate-request and the terminal response — is checked
+// to echo requestID back unchanged (docs/protocol-gate-manager.md 1節).
+func doStartOrLoad(t *testing.T, conn *ndjson.Conn, requestID string, req map[string]any, terminal string) {
 	t.Helper()
+	req["requestId"] = requestID
 	send(t, conn, req)
 
 	msg := recv(t, conn)
 	if msg["type"] == "evacuate-request" {
-		send(t, conn, map[string]any{"type": "evacuate-complete"})
+		if msg["requestId"] != requestID {
+			t.Fatalf("evacuate-request requestId = %v, want %v", msg["requestId"], requestID)
+		}
+		send(t, conn, map[string]any{"type": "evacuate-complete", "requestId": requestID})
 		msg = recv(t, conn)
 	}
 	if msg["type"] != terminal {
 		t.Fatalf("expected %s, got %+v", terminal, msg)
 	}
+	if msg["requestId"] != requestID {
+		t.Fatalf("%s requestId = %v, want %v (got %+v)", terminal, msg["requestId"], requestID, msg)
+	}
+}
+
+// stateQuery sends state-query tagged with requestID and returns the
+// response after checking it echoes the same requestId back.
+func stateQuery(t *testing.T, conn *ndjson.Conn, requestID string) map[string]any {
+	t.Helper()
+	send(t, conn, map[string]any{"type": "state-query", "requestId": requestID})
+	msg := recv(t, conn)
+	if msg["requestId"] != requestID {
+		t.Fatalf("state-response requestId = %v, want %v (got %+v)", msg["requestId"], requestID, msg)
+	}
+	return msg
 }
 
 func waitForNonEmptyDir(t *testing.T, dir string, timeout time.Duration) {
@@ -238,16 +259,14 @@ func TestE2E_StartArchiveLoadShutdown(t *testing.T) {
 	gateConn := l.dialGate(t)
 
 	t.Log("state-query before any /start: expect stopped/false (a fresh deploy, not unknown)")
-	send(t, gateConn, map[string]any{"type": "state-query"})
-	if msg := recv(t, gateConn); msg["state"] != "stopped" || msg["running"] != "false" {
+	if msg := stateQuery(t, gateConn, "req-initial"); msg["state"] != "stopped" || msg["running"] != "false" {
 		t.Fatalf("state-response = %+v, want {stopped false}", msg)
 	}
 
 	t.Log("/start clean: expect evacuate-request -> hardcore-ready (nothing was running, so evacuate is actually a no-op on Gate's side)")
-	doStartOrLoad(t, gateConn, map[string]any{"type": "start", "clean": true, "requestedBy": "e2e"}, "hardcore-ready")
+	doStartOrLoad(t, gateConn, "req-start-clean", map[string]any{"type": "start", "clean": true, "requestedBy": "e2e"}, "hardcore-ready")
 
-	send(t, gateConn, map[string]any{"type": "state-query"})
-	if msg := recv(t, gateConn); msg["state"] != "ready" || msg["running"] != "true" {
+	if msg := stateQuery(t, gateConn, "req-after-start"); msg["state"] != "ready" || msg["running"] != "true" {
 		t.Fatalf("state-response after start clean = %+v, want {ready true}", msg)
 	}
 
@@ -268,29 +287,26 @@ func TestE2E_StartArchiveLoadShutdown(t *testing.T) {
 	}
 
 	t.Log("/deactivate: expect evacuate-request -> evacuate-complete -> deactivate-complete, running preserved")
-	doStartOrLoad(t, gateConn, map[string]any{"type": "deactivate", "requestedBy": "e2e"}, "deactivate-complete")
+	doStartOrLoad(t, gateConn, "req-deactivate", map[string]any{"type": "deactivate", "requestedBy": "e2e"}, "deactivate-complete")
 
-	send(t, gateConn, map[string]any{"type": "state-query"})
-	if msg := recv(t, gateConn); msg["state"] != "stopped" || msg["running"] != "true" {
+	if msg := stateQuery(t, gateConn, "req-after-deactivate"); msg["state"] != "stopped" || msg["running"] != "true" {
 		t.Fatalf("state-response after deactivate = %+v, want {stopped true} (challenge paused, not lost)", msg)
 	}
 
 	t.Log("/start (clean:false) again: process was stopped but world/running survive, expect immediate hardcore-ready with no evacuate")
-	send(t, gateConn, map[string]any{"type": "start", "clean": false, "requestedBy": "e2e"})
-	if msg := recv(t, gateConn); msg["type"] != "hardcore-ready" {
+	send(t, gateConn, map[string]any{"type": "start", "clean": false, "requestId": "req-resume", "requestedBy": "e2e"})
+	if msg := recv(t, gateConn); msg["type"] != "hardcore-ready" || msg["requestId"] != "req-resume" {
 		t.Fatalf("expected hardcore-ready with no evacuate-request in between (nothing was running to evacuate), got %+v", msg)
 	}
 
-	send(t, gateConn, map[string]any{"type": "state-query"})
-	if msg := recv(t, gateConn); msg["state"] != "ready" || msg["running"] != "true" {
+	if msg := stateQuery(t, gateConn, "req-after-resume"); msg["state"] != "ready" || msg["running"] != "true" {
 		t.Fatalf("state-response after resume = %+v, want {ready true}", msg)
 	}
 
 	t.Log("/load latest force=true: expect evacuate-request -> hardcore-ready, restoring the archive")
-	doStartOrLoad(t, gateConn, map[string]any{"type": "load", "name": "latest", "force": true, "requestedBy": "e2e"}, "hardcore-ready")
+	doStartOrLoad(t, gateConn, "req-load", map[string]any{"type": "load", "name": "latest", "force": true, "requestedBy": "e2e"}, "hardcore-ready")
 
-	send(t, gateConn, map[string]any{"type": "state-query"})
-	if msg := recv(t, gateConn); msg["state"] != "ready" || msg["running"] != "true" {
+	if msg := stateQuery(t, gateConn, "req-after-load"); msg["state"] != "ready" || msg["running"] != "true" {
 		t.Fatalf("state-response after load = %+v, want {ready true}", msg)
 	}
 
@@ -348,7 +364,7 @@ func TestE2E_PersistsRunningAcrossRestart(t *testing.T) {
 	gateConn1 := l.dialGate(t)
 
 	t.Log("first-ever /start clean must be accepted immediately (no prior state.json)")
-	doStartOrLoad(t, gateConn1, map[string]any{"type": "start", "clean": true, "requestedBy": "e2e"}, "hardcore-ready")
+	doStartOrLoad(t, gateConn1, "req-first-start", map[string]any{"type": "start", "clean": true, "requestedBy": "e2e"}, "hardcore-ready")
 
 	t.Log("graceful shutdown so the next manager doesn't see this one as an orphan")
 	if err := proc1.cmd.Process.Signal(syscall.SIGTERM); err != nil {
@@ -375,14 +391,13 @@ func TestE2E_PersistsRunningAcrossRestart(t *testing.T) {
 	proc2 := l.start(t)
 	gateConn2 := l.dialGate(t)
 
-	send(t, gateConn2, map[string]any{"type": "state-query"})
-	if msg := recv(t, gateConn2); msg["state"] != "stopped" || msg["running"] != "true" {
+	if msg := stateQuery(t, gateConn2, "req-after-restart"); msg["state"] != "stopped" || msg["running"] != "true" {
 		t.Fatalf("state-response after restart = %+v, want {stopped true} (persisted running, not unknown)", msg)
 	}
 
 	t.Log("/start (clean:false) after restart must resume the persisted challenge without any evacuate")
-	send(t, gateConn2, map[string]any{"type": "start", "clean": false, "requestedBy": "e2e"})
-	if msg := recv(t, gateConn2); msg["type"] != "hardcore-ready" {
+	send(t, gateConn2, map[string]any{"type": "start", "clean": false, "requestId": "req-resume-after-restart", "requestedBy": "e2e"})
+	if msg := recv(t, gateConn2); msg["type"] != "hardcore-ready" || msg["requestId"] != "req-resume-after-restart" {
 		t.Fatalf("expected hardcore-ready, got %+v", msg)
 	}
 
@@ -409,7 +424,7 @@ func TestE2E_ReapsOrphanAfterCrash(t *testing.T) {
 
 	proc1 := l.start(t)
 	gateConn1 := l.dialGate(t)
-	doStartOrLoad(t, gateConn1, map[string]any{"type": "start", "clean": true, "requestedBy": "e2e"}, "hardcore-ready")
+	doStartOrLoad(t, gateConn1, "req-start", map[string]any{"type": "start", "clean": true, "requestedBy": "e2e"}, "hardcore-ready")
 
 	pidData, err := os.ReadFile(l.pidFilePath)
 	if err != nil {
