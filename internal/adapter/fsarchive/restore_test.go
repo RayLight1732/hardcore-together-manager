@@ -3,6 +3,7 @@ package fsarchive
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -56,6 +57,56 @@ func TestRestore_CopiesWorldBack(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(worldDir, "region", "r.0.0.mca")); err != nil {
 		t.Errorf("restored region file missing: %v", err)
+	}
+}
+
+// TestRestore_MatchesParentOwnership guards against the restored world/
+// silently ending up owned by whatever UID the Manager process itself runs
+// as (from os.CopyFS creating brand-new inodes) instead of matching
+// hardcore.workDir's existing owner — the actual cause of a real deployment
+// bug (the hardcore process, running as a different UID than Manager,
+// failed to open world/session.lock with a permission error after /load).
+// The test can only exercise the "matches" case (chowning to the current
+// user's own uid/gid always succeeds without special privilege — matching
+// to some other, arbitrary UID would require root), but that's enough to
+// confirm the walk actually runs against every restored entry without error.
+func TestRestore_MatchesParentOwnership(t *testing.T) {
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	r, _, worldDir := newTestRepository(t)
+	hardcoreDir := filepath.Dir(worldDir)
+
+	parentInfo, err := os.Stat(hardcoreDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentStat := parentInfo.Sys().(*syscall.Stat_t)
+
+	if _, err := r.Save("save1", 1, clock); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(worldDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Restore("save1"); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	err = filepath.WalkDir(worldDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		stat := info.Sys().(*syscall.Stat_t)
+		if stat.Uid != parentStat.Uid || stat.Gid != parentStat.Gid {
+			t.Errorf("%s owned by %d:%d, want %d:%d (hardcore.workDir's owner)", path, stat.Uid, stat.Gid, parentStat.Uid, parentStat.Gid)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
