@@ -26,6 +26,14 @@ func (r *Repository) Exists(name string) (bool, error) {
 // already removed the current world/ (port.WorldPreparer.WipeWorld) —
 // Restore only copies, matching Save's use of os.CopyFS which refuses to
 // overwrite existing files.
+//
+// The restored files are also chowned to match worldDir's parent directory
+// (hardcore.workDir) — see matchParentOwnership's doc comment for why: the
+// fresh copy is otherwise owned by whatever UID Manager itself runs as,
+// which can differ from the UID that actually launches the hardcore
+// process (e.g. a container setup where Manager runs as root but the
+// server itself runs as an unprivileged user), causing the restored world
+// to be unreadable/unwritable by the server.
 func (r *Repository) Restore(name string) error {
 	exists, err := r.Exists(name)
 	if err != nil {
@@ -38,6 +46,10 @@ func (r *Repository) Restore(name string) error {
 	src := filepath.Join(r.archiveDir, name, "world")
 	if err := os.CopyFS(r.worldDir, os.DirFS(src)); err != nil {
 		return fmt.Errorf("fsarchive: restore %s: %w", name, err)
+	}
+
+	if err := matchParentOwnership(r.worldDir); err != nil {
+		return fmt.Errorf("fsarchive: restore %s: match ownership: %w", name, err)
 	}
 	return nil
 }
