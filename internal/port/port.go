@@ -124,14 +124,25 @@ type RecordsRepository interface {
 
 // GateNotifier is how application sends Gate the messages that only make
 // sense in reply to something Gate itself sent (docs/protocol-gate-manager.md
-// 3節). Implemented by adapter/gateserver.
+// 3節). Implemented by adapter/gateserver. Every method takes requestID —
+// the UUID Gate attached to the request being answered — and echoes it back
+// verbatim; Manager never interprets its value (docs/protocol-gate-manager.md
+// 1節, architecture-manager.md 7節).
 type GateNotifier interface {
-	RequestEvacuate(ctx context.Context, reason string) error
-	SendHardcoreReady() error
-	SendRejected(kind, reason string) error
+	RequestEvacuate(ctx context.Context, requestID, reason string) error
+	SendHardcoreReady(requestID string) error
+	SendRejected(requestID, kind, reason string) error
 	// SendDeactivateComplete notifies Gate that /deactivate's process stop
 	// has completed (docs/protocol-gate-manager.md 3.5a節).
-	SendDeactivateComplete() error
+	SendDeactivateComplete(requestID string) error
+	// SendFailed notifies Gate that an accepted start/load/deactivate
+	// failed partway through (docs/protocol-gate-manager.md 3.5b節). kind
+	// is "start-failed"|"load-failed"|"deactivate-failed". recovered
+	// reports whether Manager confirmed the hardcore process is not
+	// running and reset phase back to stopped (safe to retry immediately)
+	// or had to leave phase mid-transition because it couldn't confirm
+	// that (architecture-manager.md 8節・8a節).
+	SendFailed(requestID, kind, reason string, recovered bool) error
 }
 
 // ReadyWaiter lets application block until the hardcore MOD's `ready`

@@ -58,14 +58,17 @@ func New(deps Deps, timeouts Timeouts) *ChallengeApplicationService {
 	return &ChallengeApplicationService{deps: deps, timeouts: timeouts}
 }
 
-// Snapshot returns the current {phase, running}, for state-query.
-func (s *ChallengeApplicationService) Snapshot() challenge.State {
+// Snapshot returns the current {phase, running}, for state-query. requestID
+// is unused here — Snapshot never calls back into port.GateNotifier — but is
+// accepted for uniformity with every other Application method
+// (docs/protocol-gate-manager.md 1節, architecture-manager.md 7節).
+func (s *ChallengeApplicationService) Snapshot(requestID string) challenge.State {
 	return s.deps.State.Snapshot()
 }
 
 // SaveData returns every save/death/clear event across all challenges,
-// oldest first, for /savedata.
-func (s *ChallengeApplicationService) SaveData() ([]records.SaveDataEntry, error) {
+// oldest first, for /savedata. See Snapshot's doc comment re: requestID.
+func (s *ChallengeApplicationService) SaveData(requestID string) ([]records.SaveDataEntry, error) {
 	all, err := s.deps.Records.ReadAll()
 	if err != nil {
 		return nil, err
@@ -75,7 +78,8 @@ func (s *ChallengeApplicationService) SaveData() ([]records.SaveDataEntry, error
 
 // Senpan tallies deaths by player across all challenges, for /senpan
 // list|count (mode only affects Gate's display, per docs/protocol-gate-manager.md 3.7節).
-func (s *ChallengeApplicationService) Senpan() ([]records.SenpanEntry, error) {
+// See Snapshot's doc comment re: requestID.
+func (s *ChallengeApplicationService) Senpan(requestID string) ([]records.SenpanEntry, error) {
 	all, err := s.deps.Records.ReadAll()
 	if err != nil {
 		return nil, err
@@ -142,12 +146,15 @@ func (s *ChallengeApplicationService) HandleArchiveRequest(name string, elapsedT
 // the destructive "wipe and regenerate" path (Start's original behavior,
 // architecture-manager.md 8節); clean:false is the resume-only path that
 // never touches world/ and never looks at running, the structural fix for
-// the initial /start deadlock (architecture-manager.md 8a節).
-func (s *ChallengeApplicationService) Start(ctx context.Context, clean bool, requestedBy string) error {
+// the initial /start deadlock (architecture-manager.md 8a節). requestID is
+// the UUID Gate attached to this request (docs/protocol-gate-manager.md
+// 1節); it is threaded through unchanged to whatever terminal message
+// (start-rejected/start-failed/hardcore-ready) eventually answers it.
+func (s *ChallengeApplicationService) Start(ctx context.Context, requestID string, clean bool, requestedBy string) error {
 	if clean {
-		return s.startClean(ctx, requestedBy)
+		return s.startClean(ctx, requestID, requestedBy)
 	}
-	return s.startResume(ctx, requestedBy)
+	return s.startResume(ctx, requestID, requestedBy)
 }
 
 // startClean is /start clean (architecture-manager.md 8節). Its running
@@ -163,13 +170,13 @@ func (s *ChallengeApplicationService) Start(ctx context.Context, clean bool, req
 // (state.TryMarkStarting is atomic on its own, no lock needed) and only
 // takes opMutex afterward, right before the file/process operations it
 // actually needs to serialize with archive-request.
-func (s *ChallengeApplicationService) startClean(ctx context.Context, requestedBy string) error {
-	log.Printf("application: start clean requested by %s", requestedBy)
+func (s *ChallengeApplicationService) startClean(ctx context.Context, requestID, requestedBy string) error {
+	log.Printf("application: start clean requested by %s (request=%s)", requestedBy, requestID)
 
 	prior := s.deps.State.Snapshot()
 	ok, reason := s.deps.State.TryMarkStarting(true)
 	if !ok {
-		return s.deps.Gate.SendRejected("start-rejected", reason)
+		return s.deps.Gate.SendRejected(requestID, "start-rejected", reason)
 	}
 
 	s.opMutex.Lock()
@@ -188,19 +195,19 @@ func (s *ChallengeApplicationService) startClean(ctx context.Context, requestedB
 	// docs/protocol-gate-manager.md 3.5節: /start clean always uses
 	// force-reset, unconditionally (unlike Load, where it depends on the
 	// force flag).
-	return s.runSequence(ctx, prior, prepare, "force-reset")
+	return s.runSequence(ctx, requestID, "start-failed", prior, prepare, "force-reset")
 }
 
 // startResume is /start（clean無し）(architecture-manager.md 8a節): launch
 // the hardcore process without touching world/, accepted purely on
 // "is a process already running" (phase), never on running. This is the
 // structural fix for the initial /start deadlock — see package doc comment.
-func (s *ChallengeApplicationService) startResume(ctx context.Context, requestedBy string) error {
-	log.Printf("application: start (resume) requested by %s", requestedBy)
+func (s *ChallengeApplicationService) startResume(ctx context.Context, requestID, requestedBy string) error {
+	log.Printf("application: start (resume) requested by %s (request=%s)", requestedBy, requestID)
 
 	ok, reason := s.deps.State.TryMarkResuming()
 	if !ok {
-		return s.deps.Gate.SendRejected("start-rejected", reason)
+		return s.deps.Gate.SendRejected(requestID, "start-rejected", reason)
 	}
 
 	s.opMutex.Lock()
@@ -209,7 +216,7 @@ func (s *ChallengeApplicationService) startResume(ctx context.Context, requested
 	// A failed process.Start here means the challenge itself never
 	// changed (world/ was never touched) — only phase should revert,
 	// running must be preserved (architecture-manager.md 8a節).
-	return s.launchAndAwaitReady(ctx, s.deps.State.MarkDeactivated)
+	return s.launchAndAwaitReady(ctx, requestID, "start-failed", s.deps.State.MarkDeactivated)
 }
 
 // Load implements /load <name|latest> [force] (spec 2.1節・7.3節). The
@@ -217,13 +224,13 @@ func (s *ChallengeApplicationService) startResume(ctx context.Context, requested
 // (so "挑戦が進行中です" always takes priority over an archive-not-found
 // error, per spec 2.1節's ordering) but before opMutex, since it's a plain
 // read that doesn't need to serialize against archive-request.
-func (s *ChallengeApplicationService) Load(ctx context.Context, name string, force bool, requestedBy string) error {
-	log.Printf("application: load %q requested by %s (force=%v)", name, requestedBy, force)
+func (s *ChallengeApplicationService) Load(ctx context.Context, requestID string, name string, force bool, requestedBy string) error {
+	log.Printf("application: load %q requested by %s (force=%v, request=%s)", name, requestedBy, force, requestID)
 
 	prior := s.deps.State.Snapshot()
 	ok, reason := s.deps.State.TryMarkStarting(force)
 	if !ok {
-		return s.deps.Gate.SendRejected("load-rejected", reason)
+		return s.deps.Gate.SendRejected(requestID, "load-rejected", reason)
 	}
 
 	resolvedName := name
@@ -231,7 +238,7 @@ func (s *ChallengeApplicationService) Load(ctx context.Context, name string, for
 		latest, err := s.deps.Archive.Latest()
 		if err != nil {
 			s.deps.State.Restore(prior)
-			return s.deps.Gate.SendRejected("load-rejected", "アーカイブが1件も存在しません")
+			return s.deps.Gate.SendRejected(requestID, "load-rejected", "アーカイブが1件も存在しません")
 		}
 		resolvedName = latest
 	} else {
@@ -242,7 +249,7 @@ func (s *ChallengeApplicationService) Load(ctx context.Context, name string, for
 		}
 		if !exists {
 			s.deps.State.Restore(prior)
-			return s.deps.Gate.SendRejected("load-rejected", fmt.Sprintf("アーカイブ%sは存在しません", name))
+			return s.deps.Gate.SendRejected(requestID, "load-rejected", fmt.Sprintf("アーカイブ%sは存在しません", name))
 		}
 	}
 
@@ -267,20 +274,20 @@ func (s *ChallengeApplicationService) Load(ctx context.Context, name string, for
 		return nil
 	}
 
-	return s.runSequence(ctx, prior, prepare, evacuateReason(force))
+	return s.runSequence(ctx, requestID, "load-failed", prior, prepare, evacuateReason(force))
 }
 
 // Deactivate implements /deactivate (spec 2.1節・7.4節,
 // architecture-manager.md 8a節): stop the hardcore process without ever
 // touching world/ or running. Only a running process (phase==ready) may be
 // deactivated.
-func (s *ChallengeApplicationService) Deactivate(ctx context.Context, requestedBy string) error {
-	log.Printf("application: deactivate requested by %s", requestedBy)
+func (s *ChallengeApplicationService) Deactivate(ctx context.Context, requestID, requestedBy string) error {
+	log.Printf("application: deactivate requested by %s (request=%s)", requestedBy, requestID)
 
 	prior := s.deps.State.Snapshot()
 	ok, reason := s.deps.State.TryMarkDeactivating()
 	if !ok {
-		return s.deps.Gate.SendRejected("deactivate-rejected", reason)
+		return s.deps.Gate.SendRejected(requestID, "deactivate-rejected", reason)
 	}
 
 	s.opMutex.Lock()
@@ -288,19 +295,30 @@ func (s *ChallengeApplicationService) Deactivate(ctx context.Context, requestedB
 
 	evacCtx, cancel := context.WithTimeout(ctx, s.timeouts.Evacuate)
 	defer cancel()
-	if err := s.deps.Gate.RequestEvacuate(evacCtx, "deactivate"); err != nil {
+	if err := s.deps.Gate.RequestEvacuate(evacCtx, requestID, "deactivate"); err != nil {
 		// Nothing has been torn down yet.
 		s.deps.State.Restore(prior)
+		s.notifyFailed(requestID, "deactivate-failed", err, true)
 		return fmt.Errorf("application: evacuate: %w", err)
 	}
 
 	stopCtx, cancel := context.WithTimeout(ctx, s.timeouts.ProcessStop+5*time.Second)
 	defer cancel()
 	if err := s.deps.Process.Stop(stopCtx, s.timeouts.ProcessStop); err != nil {
-		// Whether the process actually died is unclear; stay in the
-		// stopping phase (stuck until an operator investigates) but drop
-		// to running=unknown rather than falsely claim anything.
-		s.deps.State.MarkUnknown()
+		// Whether the process actually died is unclear. Only if
+		// Process.IsRunning() can confirm it's gone do we drop phase back
+		// to stopped (safe to retry immediately); otherwise stay in the
+		// stopping phase (stuck until an operator investigates) — a live
+		// process might still be sharing world/ and the port with
+		// whatever a new /start would launch (architecture-manager.md 8節).
+		recovered := !s.deps.Process.IsRunning()
+		if recovered {
+			s.deps.State.MarkDeactivated()
+			s.deps.State.MarkUnknown()
+		} else {
+			s.deps.State.MarkUnknown()
+		}
+		s.notifyFailed(requestID, "deactivate-failed", err, recovered)
 		return fmt.Errorf("application: stop: %w", err)
 	}
 
@@ -308,7 +326,7 @@ func (s *ChallengeApplicationService) Deactivate(ctx context.Context, requestedB
 	// (if any) is merely paused, not finished (spec 2.1節).
 	s.deps.State.MarkDeactivated()
 
-	if err := s.deps.Gate.SendDeactivateComplete(); err != nil {
+	if err := s.deps.Gate.SendDeactivateComplete(requestID); err != nil {
 		return fmt.Errorf("application: send deactivate-complete: %w", err)
 	}
 	return nil
@@ -319,7 +337,9 @@ func (s *ChallengeApplicationService) Deactivate(ctx context.Context, requestedB
 // launchAndAwaitReady for the process-start → ready-wait → hardcore-ready
 // half shared with startResume. The caller must already hold opMutex and
 // have committed the {starting, unknown} transition via
-// state.TryMarkStarting.
+// state.TryMarkStarting. failedKind is "start-failed" or "load-failed" —
+// whichever message any failure along the way should be reported as
+// (docs/protocol-gate-manager.md 3.5b節).
 //
 // Evacuate+stop only run if a process was actually running/starting
 // (prior.Phase != stopped, architecture-manager.md 8節): skipping them
@@ -328,14 +348,15 @@ func (s *ChallengeApplicationService) Deactivate(ctx context.Context, requestedB
 //
 // Each failure branch picks the most accurate state.Store recovery call for
 // what Manager can actually know at that point — see the inline comments.
-func (s *ChallengeApplicationService) runSequence(ctx context.Context, prior challenge.State, prepareWorld func() error, evacReason string) error {
+func (s *ChallengeApplicationService) runSequence(ctx context.Context, requestID, failedKind string, prior challenge.State, prepareWorld func() error, evacReason string) error {
 	if prior.Phase != challenge.PhaseStopped {
 		evacCtx, cancel := context.WithTimeout(ctx, s.timeouts.Evacuate)
-		if err := s.deps.Gate.RequestEvacuate(evacCtx, evacReason); err != nil {
+		if err := s.deps.Gate.RequestEvacuate(evacCtx, requestID, evacReason); err != nil {
 			cancel()
 			// Nothing has been torn down yet; whatever was running before is
 			// presumably still fine. Undo the {starting, unknown} transition.
 			s.deps.State.Restore(prior)
+			s.notifyFailed(requestID, failedKind, err, true)
 			return fmt.Errorf("application: evacuate: %w", err)
 		}
 		cancel()
@@ -344,11 +365,20 @@ func (s *ChallengeApplicationService) runSequence(ctx context.Context, prior cha
 		err := s.deps.Process.Stop(stopCtx, s.timeouts.ProcessStop)
 		stopCancel()
 		if err != nil {
-			// Whether the old process actually died is unclear. Stay in the
-			// starting phase (so a bare /start·/load keeps refusing until an
-			// operator forces it) but drop to running=unknown rather than
-			// falsely claim it's definitely stopped.
-			s.deps.State.MarkUnknown()
+			// Whether the old process actually died is unclear. Only if
+			// Process.IsRunning() can confirm it's gone do we drop phase
+			// back to stopped; otherwise stay in the starting phase (so a
+			// bare /start·/load keeps refusing until an operator
+			// investigates) rather than falsely claim it's definitely
+			// stopped.
+			recovered := !s.deps.Process.IsRunning()
+			if recovered {
+				s.deps.State.MarkDeactivated()
+				s.deps.State.MarkUnknown()
+			} else {
+				s.deps.State.MarkUnknown()
+			}
+			s.notifyFailed(requestID, failedKind, err, recovered)
 			return fmt.Errorf("application: stop: %w", err)
 		}
 	}
@@ -357,6 +387,7 @@ func (s *ChallengeApplicationService) runSequence(ctx context.Context, prior cha
 		// The old process is confirmed stopped (or never was) and no new
 		// one has started: "nothing is running" is an accurate claim here.
 		s.deps.State.MarkStopped()
+		s.notifyFailed(requestID, failedKind, err, true)
 		return fmt.Errorf("application: prepare world: %w", err)
 	}
 
@@ -364,22 +395,29 @@ func (s *ChallengeApplicationService) runSequence(ctx context.Context, prior cha
 	// and the world has just been wiped/replaced: "running=false" is an
 	// accurate claim, unlike startResume's tail where world/ was never
 	// touched.
-	return s.launchAndAwaitReady(ctx, func() { s.deps.State.MarkStopped() })
+	return s.launchAndAwaitReady(ctx, requestID, failedKind, func() { s.deps.State.MarkStopped() })
 }
 
 // launchAndAwaitReady is the tail shared by runSequence (startClean/Load)
 // and startResume: start the process, wait for it to report ready, then
 // notify Gate (architecture-manager.md 8節 steps 6-9・8a節 steps 4-6). The
-// caller must already hold opMutex.
+// caller must already hold opMutex. failedKind is passed straight through
+// to any GateNotifier.SendFailed call this makes.
 //
 // onStartFailure lets each caller pick the state recovery accurate for its
 // own context — see runSequence and startResume's call sites — since
 // whether running should be reset to false or left untouched depends on
-// whether prepareWorld already ran.
-func (s *ChallengeApplicationService) launchAndAwaitReady(ctx context.Context, onStartFailure func()) error {
+// whether prepareWorld already ran. Either way process.Start failing here
+// means the process never actually launched, so recovered is always true
+// for that branch. The ready-wait-timeout branch, in contrast, behaves
+// identically regardless of caller (architecture-manager.md 8節 手順7・8a節
+// 手順4): it checks Process.IsRunning() to decide recovered, exactly like
+// runSequence's/Deactivate's stop-failure branch.
+func (s *ChallengeApplicationService) launchAndAwaitReady(ctx context.Context, requestID, failedKind string, onStartFailure func()) error {
 	s.deps.Ready.DrainReady()
 	if err := s.deps.Process.Start(); err != nil {
 		onStartFailure()
+		s.notifyFailed(requestID, failedKind, err, true)
 		return fmt.Errorf("application: start process: %w", err)
 	}
 
@@ -389,17 +427,38 @@ func (s *ChallengeApplicationService) launchAndAwaitReady(ctx context.Context, o
 		// The process was launched but never confirmed ready. It might
 		// still come up late — the modserver adapter's `ready` handling
 		// calls HandleReady independently of this wait, so nothing is lost
-		// if it does. Stay in the starting phase, drop to unknown rather
-		// than guess.
-		s.deps.State.MarkUnknown()
+		// if it does. Only drop phase back to stopped if IsRunning()
+		// confirms the process is actually gone (e.g. it crashed before
+		// sending ready); otherwise stay in the starting phase rather than
+		// risk double-launching a second process against the same world/
+		// and port.
+		recovered := !s.deps.Process.IsRunning()
+		if recovered {
+			s.deps.State.MarkDeactivated()
+			s.deps.State.MarkUnknown()
+		} else {
+			s.deps.State.MarkUnknown()
+		}
+		s.notifyFailed(requestID, failedKind, err, recovered)
 		return fmt.Errorf("application: wait for ready: %w", err)
 	}
 
 	// HandleReady already transitioned state to {ready, running}.
-	if err := s.deps.Gate.SendHardcoreReady(); err != nil {
+	if err := s.deps.Gate.SendHardcoreReady(requestID); err != nil {
 		return fmt.Errorf("application: send hardcore-ready: %w", err)
 	}
 	return nil
+}
+
+// notifyFailed sends start-failed/load-failed/deactivate-failed
+// (docs/protocol-gate-manager.md 3.5b節), logging rather than propagating a
+// failure to do even that — the caller already has a real error to return
+// for the operation itself; failing to also notify Gate about it is a
+// secondary, best-effort concern.
+func (s *ChallengeApplicationService) notifyFailed(requestID, kind string, err error, recovered bool) {
+	if sendErr := s.deps.Gate.SendFailed(requestID, kind, err.Error(), recovered); sendErr != nil {
+		log.Printf("application: send %s: %v", kind, sendErr)
+	}
 }
 
 func evacuateReason(force bool) string {
