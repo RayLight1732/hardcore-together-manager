@@ -176,7 +176,7 @@ func (s *ChallengeApplicationService) startClean(ctx context.Context, requestID,
 	prior := s.deps.State.Snapshot()
 	ok, reason := s.deps.State.TryMarkStarting(true)
 	if !ok {
-		return s.deps.Gate.SendRejected(requestID, "start-rejected", reason)
+		return s.deps.Gate.SendRejected(requestID, port.KindStartRejected, reason)
 	}
 
 	s.opMutex.Lock()
@@ -195,7 +195,7 @@ func (s *ChallengeApplicationService) startClean(ctx context.Context, requestID,
 	// docs/protocol-gate-manager.md 3.5節: /start clean always uses
 	// force-reset, unconditionally (unlike Load, where it depends on the
 	// force flag).
-	return s.runSequence(ctx, requestID, "start-failed", prior, prepare, "force-reset")
+	return s.runSequence(ctx, requestID, port.KindStartFailed, prior, prepare, "force-reset")
 }
 
 // startResume is /start（clean無し）(architecture-manager.md 8a節): launch
@@ -207,7 +207,7 @@ func (s *ChallengeApplicationService) startResume(ctx context.Context, requestID
 
 	ok, reason := s.deps.State.TryMarkResuming()
 	if !ok {
-		return s.deps.Gate.SendRejected(requestID, "start-rejected", reason)
+		return s.deps.Gate.SendRejected(requestID, port.KindStartRejected, reason)
 	}
 
 	s.opMutex.Lock()
@@ -216,7 +216,7 @@ func (s *ChallengeApplicationService) startResume(ctx context.Context, requestID
 	// A failed process.Start here means the challenge itself never
 	// changed (world/ was never touched) — only phase should revert,
 	// running must be preserved (architecture-manager.md 8a節).
-	return s.launchAndAwaitReady(ctx, requestID, "start-failed", s.deps.State.MarkDeactivated)
+	return s.launchAndAwaitReady(ctx, requestID, port.KindStartFailed, s.deps.State.MarkDeactivated)
 }
 
 // Load implements /load <name|latest> [force] (spec 2.1節・7.3節). The
@@ -230,7 +230,7 @@ func (s *ChallengeApplicationService) Load(ctx context.Context, requestID string
 	prior := s.deps.State.Snapshot()
 	ok, reason := s.deps.State.TryMarkStarting(force)
 	if !ok {
-		return s.deps.Gate.SendRejected(requestID, "load-rejected", reason)
+		return s.deps.Gate.SendRejected(requestID, port.KindLoadRejected, reason)
 	}
 
 	resolvedName := name
@@ -238,7 +238,7 @@ func (s *ChallengeApplicationService) Load(ctx context.Context, requestID string
 		latest, err := s.deps.Archive.Latest()
 		if err != nil {
 			s.deps.State.Restore(prior)
-			return s.deps.Gate.SendRejected(requestID, "load-rejected", "アーカイブが1件も存在しません")
+			return s.deps.Gate.SendRejected(requestID, port.KindLoadRejected, "アーカイブが1件も存在しません")
 		}
 		resolvedName = latest
 	} else {
@@ -249,7 +249,7 @@ func (s *ChallengeApplicationService) Load(ctx context.Context, requestID string
 		}
 		if !exists {
 			s.deps.State.Restore(prior)
-			return s.deps.Gate.SendRejected(requestID, "load-rejected", fmt.Sprintf("アーカイブ%sは存在しません", name))
+			return s.deps.Gate.SendRejected(requestID, port.KindLoadRejected, fmt.Sprintf("アーカイブ%sは存在しません", name))
 		}
 	}
 
@@ -274,7 +274,7 @@ func (s *ChallengeApplicationService) Load(ctx context.Context, requestID string
 		return nil
 	}
 
-	return s.runSequence(ctx, requestID, "load-failed", prior, prepare, evacuateReason(force))
+	return s.runSequence(ctx, requestID, port.KindLoadFailed, prior, prepare, evacuateReason(force))
 }
 
 // Deactivate implements /deactivate (spec 2.1節・7.4節,
@@ -287,7 +287,7 @@ func (s *ChallengeApplicationService) Deactivate(ctx context.Context, requestID,
 	prior := s.deps.State.Snapshot()
 	ok, reason := s.deps.State.TryMarkDeactivating()
 	if !ok {
-		return s.deps.Gate.SendRejected(requestID, "deactivate-rejected", reason)
+		return s.deps.Gate.SendRejected(requestID, port.KindDeactivateRejected, reason)
 	}
 
 	s.opMutex.Lock()
@@ -298,7 +298,7 @@ func (s *ChallengeApplicationService) Deactivate(ctx context.Context, requestID,
 	if err := s.deps.Gate.RequestEvacuate(evacCtx, requestID, "deactivate"); err != nil {
 		// Nothing has been torn down yet.
 		s.deps.State.Restore(prior)
-		s.notifyFailed(requestID, "deactivate-failed", err, true)
+		s.notifyFailed(requestID, port.KindDeactivateFailed, err, true)
 		return fmt.Errorf("application: evacuate: %w", err)
 	}
 
@@ -318,7 +318,7 @@ func (s *ChallengeApplicationService) Deactivate(ctx context.Context, requestID,
 		} else {
 			s.deps.State.MarkUnknown()
 		}
-		s.notifyFailed(requestID, "deactivate-failed", err, recovered)
+		s.notifyFailed(requestID, port.KindDeactivateFailed, err, recovered)
 		return fmt.Errorf("application: stop: %w", err)
 	}
 
@@ -337,8 +337,9 @@ func (s *ChallengeApplicationService) Deactivate(ctx context.Context, requestID,
 // launchAndAwaitReady for the process-start → ready-wait → hardcore-ready
 // half shared with startResume. The caller must already hold opMutex and
 // have committed the {starting, unknown} transition via
-// state.TryMarkStarting. failedKind is "start-failed" or "load-failed" —
-// whichever message any failure along the way should be reported as
+// state.TryMarkStarting. failedKind is port.KindStartFailed or
+// port.KindLoadFailed — whichever message any failure along the way should
+// be reported as
 // (docs/protocol-gate-manager.md 3.5b節).
 //
 // Evacuate+stop only run if a process was actually running/starting
