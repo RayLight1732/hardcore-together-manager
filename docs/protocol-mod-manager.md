@@ -13,7 +13,10 @@
 | 再接続 | 接続失敗時は数回リトライ＋バックオフして諦める（ログ出力のみ、致命的エラーにはしない） |
 | メッセージ形式 | NDJSON（Newline-Delimited JSON）。1メッセージ＝1行のUTF-8 JSONオブジェクト＋`\n` |
 | 判別方法 | 各メッセージの`type`フィールドで種別を判別する |
+| リクエスト相関 | `archive-request`／`archive-complete`／`archive-rejected`が`requestId`（string、UUID）を持つ（3.3〜3.5節） |
 | セキュリティ | `127.0.0.1`限定リッスンにより、同一コンテナ内通信であることを前提にTLS/認証は行わない |
+
+**`requestId`**：hardcore MOD側が`archive-request`ごとに新規発行するUUID文字列。Managerは対応する応答（`archive-complete`または`archive-rejected`）に、受け取った`requestId`をそのままエコーバックする。同一TCP接続上で複数の`archive-request`が並行して未処理になりうる（手動`/archive`実行中にボス討伐による自動アーカイブが割り込む等）ため、応答がどの要求に対応するかを`name`や到着順に頼らず一意に判別できるようにするためのもの（Gate⇔Manager間シグナル〔`protocol-gate-manager.md` 1節〕で採用済みの相関パターンと同じ）。Managerは値の中身を一切解釈せず、受け取った文字列をそのまま運んで返すだけの不透明な値として扱う。`ready`・`running-changed`は応答を伴わない一方向の通知のため`requestId`を持たない。
 
 Managerとhardcoreサーバーは`os/exec`の親子プロセスとして**同一コンテナ内**で動作するため、`127.0.0.1`はコンテナ内ループバックとして解決される。MOD側はこの接続先アドレスを設定ファイルで持つ（Manager側の`signalPort`と値を一致させる必要がある）。
 
@@ -25,6 +28,7 @@ Managerとhardcoreサーバーは`os/exec`の親子プロセスとして**同一
 | `running-changed` | MOD → Manager | `running`の値が変化するたび（`/start`によるフレッシュ生成時の`true`初期化、全滅/挑戦終了系ボス討伐による`false`化） |
 | `archive-request` | MOD → Manager | `/archive <name>`実行時（`name`あり）、または指定ボス討伐等による自動アーカイブ時（`name`省略）（`save-off`→`save-all flush`実行済みの状態で送信） |
 | `archive-complete` | Manager → MOD | Managerがワールドフォルダのコピーを完了した時 |
+| `archive-rejected` | Manager → MOD | `archive-request`の`name`が既存アーカイブと重複していた場合（1回限りの通知） |
 
 ## 3. メッセージ詳細
 
@@ -61,14 +65,15 @@ MOD → Manager。`save-off`→`save-all flush`実行後に送信し、Manager�
 | フィールド | 型 | 必須 | 説明 |
 |---|---|---|---|
 | `type` | string | ✓ | 固定値 `"archive-request"` |
+| `requestId` | string | ✓ | UUID（1節） |
 | `name` | string | 任意 | アーカイブ名。OPが指定した値。**省略した場合はManagerが自動生成する**（後述） |
 | `elapsedTime` | int64 | ✓ | 経過時間（秒数、long） |
 
 ```json
-{"type":"archive-request","elapsedTime":600}
+{"type":"archive-request","requestId":"a1b2c3d4-0000-0000-0000-000000000001","elapsedTime":600}
 ```
 ```json
-{"type":"archive-request","name":"save1","elapsedTime":600}
+{"type":"archive-request","requestId":"a1b2c3d4-0000-0000-0000-000000000002","name":"save1","elapsedTime":600}
 ```
 
 `createdAt`は含めない：作成日時はMODの送信内容に依存せず、**Manager自身が`archive-request`処理時点の現在時刻から生成する**（`meta.json`へ書き込む値、`specification.md` 3.2節）。MOD・Managerは同一コンテナ上で動作し（1節）クロックが共有されるため、MOD側で改めて計測・送信する意味が無い。
@@ -88,17 +93,36 @@ Manager → MOD。ファイルコピー完了を通知する。MODはこれを�
 | フィールド | 型 | 必須 | 説明 |
 |---|---|---|---|
 | `type` | string | ✓ | 固定値 `"archive-complete"` |
+| `requestId` | string | ✓ | 対応する`archive-request`の値をそのままエコー（1節） |
 | `name` | string | ✓ | **Managerが実際に採用した最終的なアーカイブ名**（連番付与済みの場合はそれを含む）。`archive-request`で`name`を送っていた場合は通常それと一致する。省略していた場合、MODはこの値で初めて名前を知る |
 
 ```json
-{"type":"archive-complete","name":"2026-07-18T12-00-00"}
+{"type":"archive-complete","requestId":"a1b2c3d4-0000-0000-0000-000000000001","name":"2026-07-18T12-00-00"}
 ```
 
-## 4. 同期待ちの規約
+### 3.5 `archive-rejected`
 
-MODは`archive-request`送信後、**次に届く`archive-complete`**を受信するまで`save-on`を実行せずに待つ。これにより、コピー中にオートセーブが再開してしまう事態を防ぐ。1つのTCP接続上で`archive-request`は常に1件ずつ・同期的に処理される（MOD側が`archive-complete`を待ってから次の操作へ進む設計のため）ので、`name`を送っていない場合でも、次に届く`archive-complete`が対応する応答であることに変わりはない。
+Manager → MOD。`archive-request`の`name`が既存アーカイブと重複していた場合の1回限りの通知。
 
-名前重複によりManagerが`archive-request`を拒否した場合、現状**明示的な拒否シグナルは存在しない**（`specification.md` 10節の未決事項）。MODは`archive-complete`が一定時間（目安60秒、要確定）来ないことをもって失敗と判断し、OPへエラー表示する。
+**背景**：旧設計ではManagerは名前重複を検出しても自身のログに出力するだけで、TCP接続には何も送り返していなかった。MODは`archive-complete`が一定時間（60秒）来ないことをもって失敗と判断するしかなく、その間`/archive`コマンドを実行したサーバーのメインスレッドがブロックされ続ける（実装上コマンドをメインスレッド上で同期的に処理しているため）という実害を伴う不具合が実機で見つかった（`specification.md` 3.2節「`archive-rejected`の追加経緯」）。
+
+| フィールド | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `type` | string | ✓ | 固定値 `"archive-rejected"` |
+| `requestId` | string | ✓ | 対応する`archive-request`の値をそのままエコー（1節） |
+| `reason` | string | ✓ | 拒否理由（人間可読の文字列。例：`"名前 save1 は既に使用されています"`） |
+
+```json
+{"type":"archive-rejected","requestId":"a1b2c3d4-0000-0000-0000-000000000002","reason":"名前 save1 は既に使用されています"}
+```
+
+## 4. 応答待ちの規約
+
+MODは`archive-request`送信後、対応する`requestId`を持つ`archive-complete`または`archive-rejected`を受信するまで`save-on`を実行せずに待つ。これにより、コピー中にオートセーブが再開してしまう事態を防ぐ。`requestId`により相関を取るため、同一TCP接続上で複数の`archive-request`が並行して未処理であっても（手動`/archive`実行中に自動アーカイブが割り込む等）取り違えは起きない。
+
+`archive-rejected`受信時、MODは即座に失敗と判断してOPへ`reason`を表示し、`save-on`を実行する（60秒タイムアウトを待つ必要はない）。`archive-complete`・`archive-rejected`のいずれも一定時間届かない場合は、従来通りタイムアウト（目安60秒、要確定）をもって失敗として扱う（接続断など`archive-rejected`自体が届かない異常系のフォールバック）。
+
+**現状の実装との差分**：この節はプロトコル設計であり、MOD（Kotlin）・Manager（Go）双方の実装はまだ追従していない。既存実装は`archive-request`に`requestId`を持たず`name`のみで相関を取り、`archive-rejected`も未実装（Managerは名前重複時に無応答のまま）。加えてMOD側の`/archive`コマンドは現状サーバーのメインスレッドで`archive-complete`受信まで同期的にブロックする実装になっており、`archive-rejected`による即時失敗検知を活かすには、コマンドを非同期化（即座に制御を返し、応答受信時に`CommandSourceStack`経由でOPへ結果を通知する設計）することも合わせて必要になる。
 
 ## 5. 接続断の扱い
 
@@ -125,17 +149,25 @@ sequenceDiagram
     Note over MOD: ボス討伐（チェックポイント系）
     MOD->>MOD: save-off
     MOD->>MOD: save-all flush
-    MOD->>MGR: {"type":"archive-request","elapsedTime":600}
+    MOD->>MGR: {"type":"archive-request","requestId":"...","elapsedTime":600}
     MGR->>MGR: 現在時刻からnameを生成、world/ を archive/<name>/ へコピー
-    MGR->>MOD: {"type":"archive-complete","name":"..."}
+    MGR->>MOD: {"type":"archive-complete","requestId":"...","name":"..."}
     MOD->>MOD: save-on（受け取ったnameを以後のイベントログ記録等に使う）
 
     Note over MOD: 全滅
     MOD->>MGR: {"type":"running-changed","running":false}
+
+    Note over MOD: 手動 /archive save1（名前重複）
+    MOD->>MOD: save-off
+    MOD->>MOD: save-all flush
+    MOD->>MGR: {"type":"archive-request","requestId":"...","name":"save1","elapsedTime":900}
+    MGR->>MOD: {"type":"archive-rejected","requestId":"...","reason":"名前 save1 は既に使用されています"}
+    MOD->>MOD: save-on（即座にOPへ拒否理由を表示）
 ```
 
 ## 7. 未決事項
 
 - 接続リトライ回数・バックオフ設定値（`specification.md` 10節）
-- `archive-request`拒否時の即時通知シグナル（`archive-rejected`案、未実装。`specification.md` 10節）
 - Managerが`running`値を永続化する状態ファイルの具体的なパス・フォーマット（`specification.md` 2.1節「プロセス状態と`running`の永続化」。`archiveDir`等と同様、Managerの設定ファイルで指定する想定だが未確定）
+- **`requestId`／`archive-rejected`の実装反映**：3.3〜3.5節・4節はプロトコル設計として確定したが、hardcore MOD（Kotlin）・Manager（Go）双方の実装はまだ追従していない（`specification.md` 9節「message id」相当の決定・10節参照）
+- **`/archive`コマンドの非同期化**：現状MOD側の`/archive`はサーバーのメインスレッドで`archive-complete`/`archive-rejected`受信までブロックする同期実装になっている。`requestId`導入により複数の`archive-request`が並行して未処理でも相関できるようになったため、コマンドを即座に返し応答受信時に`CommandSourceStack`経由で結果を通知する非同期実装への変更が望ましいが、設計・実装ともに未着手（`architecture-neoforge.md`「未着手・既知の課題」参照）

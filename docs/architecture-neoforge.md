@@ -362,5 +362,6 @@ class FileRecordRepository(private val dir: Path) : RecordRepository
 
 ## 未着手・既知の課題
 
-- `archive-request`がGateに拒否された場合（名前重複等）を明示的に伝えるシグナルが無く、MODは60秒タイムアウトでしか失敗を検知できない（specification.md 8節参照）。将来的に`archive-rejected`のような即時拒否シグナルの追加が望ましい
+- 【設計済み・実装未反映】`archive-request`が名前重複で拒否された場合の即時通知シグナル（`archive-rejected`）と、`archive-request`／`archive-complete`／`archive-rejected`の`requestId`によるリクエスト相関を、プロトコルとして設計した（`docs/protocol-mod-manager.md` 3.3〜3.5節、`specification.md` 3.2節・6節・9節）。ただしこのリポジトリの実装（`TcpGateConnection.kt`の`pendingArchiveCompletions`が`name`のみで相関している点、Manager側`handler.go`が名前重複時に無応答で返す点）はまだこの設計を反映していない
+  - あわせて、`CommandRegistrar.kt`の`/archive`実装がサーバーのメインスレッドで`archive-complete`受信まで同期的にブロックする点（`TcpGateConnection.sendArchiveRequestAndAwait`の`future.get(60, SECONDS)`）も、`requestId`導入を機に非同期化（コマンドを即座に返し、`archive-complete`/`archive-rejected`受信時に`server.execute{}`でメインスレッドへ戻して`CommandSourceStack`経由でOPへ結果を通知する設計）することが望ましいと判断したが、設計・実装ともに未着手。実装時は355行目の「デッドロックの教訓」（Gate接続のreaderスレッド自身の上で、同じ接続の別メッセージを待つ処理をしてはいけない）を踏まえ、応答受信のコールバックは必ず`server.execute{}`でメインスレッドに戻してから`CommandSourceStack`を操作すること
 - Gate（Go実装）自体はこのリポジトリにまだ存在しない。`records/*.json`の直接読み取り（`/savedata`・`/senpan`）はGate側で新規実装する必要がある
