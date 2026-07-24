@@ -120,7 +120,7 @@ Managerが内部で持つ状態は2つで、常にペアで扱う（仕様書3.1
 - **停止**：まずプロセスへ`SIGTERM`（NeoForge/バニラサーバーは`stop`コマンド相当のgraceful shutdownに対応しないため、シグナルベースで統一する）を送り、`cmd.Wait()`をタイムアウト付きで待つ。タイムアウトした場合のみ`SIGKILL`にエスカレーションする
 - **ワールドの新規生成（`/start`用）**：`world/`ディレクトリを削除するだけで、テンプレートのコピーは行わない。**シード値は都度やり直したい**（毎回ランダムな新しいワールドで挑戦する）ため、あらかじめ焼き込んだワールドを複製する方式は採らず、`world/`が存在しない状態でプロセスを起動し、NeoForge（バニラ準拠）自身に新規ワールドを生成させる
 - **hardcoreモード・難易度HARDの固定方法**：バニラサーバーは`server.properties`の`hardcore=true`を新規ワールド生成時に読むと、そのワールドをハードコアモード（難易度HARD固定・死亡でスペクテイター送り）で生成する、という標準機能を持つ（NeoForgeもこれをそのまま継承しており、MOD側でランタイムに`setHardcore`を呼ぶ必要はない）。同様に`level-seed`を空にしておけば、新規生成のたびにランダムなシードが使われる。つまり**「テンプレートに焼き込む」必要は無く、`hardcore/`作業ディレクトリに置く`server.properties`で`hardcore=true`・`level-seed=`（空）にしておくだけで、仕様書5.3節の要件（ランタイムでの`setHardcore`相当APIが無い制約下でのhardcore固定）とユーザーが望む「シードは都度やり直す」の両方を満たせる
-- **Managerによる`server.properties`の保証**：`server.properties`自体は`world/`の外にあり`/start`のワイプ対象ではない（仕様書11節）ため、通常は初期セットアップ時に設定した値がそのまま残り続ける想定だが、手動編集等で`hardcore=true`が意図せず外れる事故を防ぐため、Managerは`/start`時に`world/`を削除する前後で`server.properties`の`hardcore=true`を読み取り検証し、`false`になっていた場合は書き戻す（`level-seed`は明示的に空へ強制はしない——運用上あえて固定シードでテストしたいケースを妨げないため。デフォルトで空にしておく運用は初期セットアップ側の責務とする）
+- **`server.properties`はManagerが検証・保証しない**：`server.properties`自体は`world/`の外にあり`/start`のワイプ対象ではない（仕様書11節）ため、初期セットアップ時に設定した`hardcore=true`がそのまま残り続ける想定。**当初はManagerが`/start`のたびに`hardcore=true`を読み取り検証し、`false`になっていた場合は書き戻す仕組みを持たせていたが、これは不要と判断し廃止した**（変更履歴末尾参照）。`hardcore=true`・`level-seed=`（空）を維持する責務は初期セットアップ側にあり、Managerは`server.properties`の中身に一切関知しない
 - **`records/`はワイプ対象に含めない**：`world/`と同階層だが別ディレクトリなので、`world/`削除処理は`records/`に触れない（仕様書11節の table通り）
 - **`Exists() (bool, error)`**：`world/`ディレクトリの存在を確認するだけの薄いメソッド。`port.WorldPreparer`に定義されている。**当初`start{clean:false}`が「ワールドが存在しません」で拒否するために使う設計だったが、これは仕様書2.1節の状態別挙動表（状態①：`world/`が無ければ拒否ではなく新規作成して起動）と矛盾する誤りだったため、`application`層からの呼び出しは削除した**（変更履歴末尾参照）。`world/`が無い場合の新規作成は、Manager側が事前にチェックするのではなく、`process.Start()`でhardcore自身を起動した際にNeoForge側が自然に行う（3節「ワールドの新規生成」）
 
@@ -240,7 +240,7 @@ Start(ctx, clean bool, requestedBy string) error:
        まだ生きている場合: state.MarkUnknown()（phaseはstartingのまま——running=trueかもしれない
          プロセスと世界を共有した状態で先へ進むのは危険なため、安全側に倒して停止させる）
          → start-failed(reason, recovered=false) 送信
-  5a. world.WipeWorld()＋world.EnsureHardcoreMode()（3節、port.WorldPreparer。Loadの場合は
+  5a. world.WipeWorld()（3節、port.WorldPreparer。Loadの場合は
      archives.Restore、後述）
      失敗時: state.MarkStopped()（旧プロセスの停止は確認済み、新プロセスも無い＝running=false は正確）
      → start-failed(reason, recovered=true) 送信
@@ -263,7 +263,7 @@ Start(ctx, clean bool, requestedBy string) error:
 
 `Load(ctx, name, force, requestedBy)`もほぼ同じ流れだが：
 - 手順2の直後（opMutex獲得**前**）に追加のアーカイブ存在チェックを行う：`archive/<name>/`の有無、`name=="latest"`の場合は全`meta.json`の`createdAt`を比較して最新を選ぶ。存在しなければ`state.Restore(prior)`で手順2の状態へ戻し、`load-rejected`を送る。**このチェックの前にrunningチェック（手順2）を済ませておくことで、「runningがtrueかつ指定アーカイブも存在しない」場合に仕様書2.1節の想定通り「挑戦が進行中です」が優先される**（アーカイブ不在エラーではなく）
-- 手順5aが「テンプレートコピー」の代わりに「`world.WipeWorld()` → `archives.Restore(name)`（4節）→ `world.EnsureHardcoreMode()`」になる。`archives.Restore`自体はコピーのみでworld/の削除は行わないため、`Start`と同じく明示的な`WipeWorld`呼び出しが必要（4節参照。ここを配線し忘れた実装バグが一度発生し、修正済み）。`EnsureHardcoreMode`はStartと同じ理由（`server.properties`はworld/の外にあり、アーカイブの復元対象に含まれないため）でLoadでも呼ぶ
+- 手順5aが「テンプレートコピー」の代わりに「`world.WipeWorld()` → `archives.Restore(name)`（4節）」になる。`archives.Restore`自体はコピーのみでworld/の削除は行わないため、`Start`と同じく明示的な`WipeWorld`呼び出しが必要（4節参照。ここを配線し忘れた実装バグが一度発生し、修正済み）
 - 各失敗時の通知は`start-failed`ではなく`load-failed`を送る（それ以外の`reason`・`recovered`の判断基準は共通）
 
 - **タイムアウト**：手順4（`evacuate-complete`待ち）・手順7（`ready`待ち）はいずれも無期限ブロックしない。具体的な秒数は14節の未確定事項（Gate側の`architecture-gate.md`にも同種の未確定事項があり、双方で値を揃える必要がある）
@@ -346,7 +346,8 @@ hardcore:
   workDir: "./hardcore"                # Managerがos/execで起動する子プロセスの作業ディレクトリ
   startCommand: ["java", "-jar", "server.jar", "nogui"]
                                         # world/生成時のhardcore固定・シードは<workDir>/server.propertiesの
-                                        # hardcore=true・level-seed=（空）で制御する（3節、templateDirは廃止）
+                                        # hardcore=true・level-seed=（空）で制御する（3節、templateDirは廃止）。
+                                        # この値の維持は初期セットアップ側の責務で、Managerは検証・保証しない
   recordsDir: "records"                # hardcore MOD設定のstorage.recordsDirと必ず一致させること（5節）
   pidFile: "./hardcore.pid"            # 孤児プロセス検知用（3節）。Manager起動時、この中のPIDが
                                         # 生きていれば道連れになれなかった旧プロセスとみなし終了させる
@@ -380,7 +381,8 @@ timeouts:
 └── hardcore/                        … config.hardcore.workDir
     ├── world/                        … /startで削除・再生成される（新規生成時、シードは都度ランダム）
     ├── records/
-    ├── server.properties             … hardcore=true・level-seed=（空）をManagerが/start時に保証する（3節）
+    ├── server.properties             … hardcore=true・level-seed=（空）を維持するのは初期セットアップ側の
+    │                                     責務で、Managerは検証・保証しない（3節）
     ├── mods/, config/ 等
 ```
 
@@ -414,7 +416,6 @@ hardcore MOD・Gate本体が別リポジトリのため、実MOD・実Gateを繋
 - **`application`**：`port.*`各インターフェースのフェイク（`fakeGate`・`fakeReady`・`fakeProcess`・`fakeWorld`・`fakeArchive`・`fakeRecords`・`fakeClock`）＋実物の`adapter/fsstate.Repository`を組み合わせ、`Start`（`clean`両パターン）/`Load`/`Deactivate`の一連シーケンス（8節・8a節）・各失敗パスでのstate復旧・`opMutex`によるアーカイブとの排他を検証する。既に起動中の状態で`Start(clean=false)`を呼ぶと拒否されること、遷移中（`starting`/`stopping`）は`clean`の値に関わらず「処理中です」で拒否されること、`Start(clean=false)`は`fakeWorld`のワイプ/復元メソッドを一切呼ばないこと（`world/`の有無も判定に使わない）、`Deactivate`成功後も`running`値が変化しないことも検証する
 - **`internal/e2e`（真のE2E、`cmd/manager`のブラックボックステスト）**：上記までは全て「1層をfakeで固めて検証する」統合テストだが、`internal/e2e/e2e_test.go`だけは唯一、`cmd/manager`を`go build`で実際にビルドし、サブプロセスとして起動し、実TCP接続でGate役として接続して検証する。hardcore役も`cmd/fakehardcore`という専用の小さなヘルパーバイナリ（同じくこのリポジトリの`cmd/`配下、製品には含めない）を実際にサブプロセスとして起動し、MOD⇔Manager間のNDJSONプロトコルを実際にしゃべらせる。検証内容：
   - `state-query`→`start`（force無し、拒否）→`start`（force有り）→`evacuate-request`/`evacuate-complete`→`hardcore-ready`→`state-query`（ready/true確認）
-  - `server.properties`の`hardcore=true`強制が実際に反映されていること
   - `cmd/fakehardcore`が`ready`直後に送る`archive-request`が実際に`archive/`配下へファイルとして残ること
   - `/load latest force`実行後、`world/`の中身が**アーカイブ時点の内容と一致する**こと（`archive.Restore`前に`world/`を消し忘れるとこの比較が失敗する。4節・8節で述べた実装バグの回帰テストそのもの）
   - `SIGTERM`送信で`cmd/manager`自身だけでなく子プロセス（`cmd/fakehardcore`）も終了すること（graceful shutdownの回帰テスト）
@@ -426,7 +427,7 @@ hardcore MOD・Gate本体が別リポジトリのため、実MOD・実Gateを繋
 
 ## 14. 未確定事項・要確認ポイント（Manager側、実装着手前に確定させたい）
 
-1. **`hardcore/`作業ディレクトリの初期セットアップ手順**（3節・10節）：`server.properties`・`mods/`・`config/`は仕様書11節で「本仕様の対象外」とされている標準NeoForgeサーバー構成だが、初回に誰が用意するか（Dockerイメージへ焼き込むのか、初回起動時にManagerが雛形を生成するのか）は未確定。3節の「Managerが`hardcore=true`を保証する」処理も、この初期ファイル一式が既に存在すること前提であり、真っさらな状態からの自動セットアップまでは範囲に含めていない
+1. **`hardcore/`作業ディレクトリの初期セットアップ手順**（3節・10節）：`server.properties`・`mods/`・`config/`は仕様書11節で「本仕様の対象外」とされている標準NeoForgeサーバー構成だが、初回に誰が用意するか（Dockerイメージへ焼き込むのか、初回起動時にManagerが雛形を生成するのか）は未確定。`hardcore=true`の維持は初期セットアップ側の責務でありManagerは検証・保証しない（3節）ため、真っさらな状態からの自動セットアップまでは範囲に含めていない
 2. **`evacuate-complete`待ち・`ready`待ちのタイムアウト秒数**（8節・9節）：Gate側の`architecture-gate.md`にも関連する未確定事項があり、双方のリポジトリで値を揃える必要がある
 3. **Gate⇔Manager間の接続タイムアウト・リトライ回数**（`docs/protocol-gate-manager.md` 5節と共通）
 4. **MOD⇔Manager間の接続リトライ回数・バックオフ設定値**（`docs/protocol-mod-manager.md` 7節と共通）
@@ -442,7 +443,7 @@ hardcore MOD・Gate本体が別リポジトリのため、実MOD・実Gateを繋
 ## 変更履歴
 
 - 初版：`specification.md`・`docs/protocol-gate-manager.md`・`docs/protocol-mod-manager.md`を踏まえ、Manager側のパッケージ構成・状態管理・プロセスライフサイクル・アーカイブ実行・records読み取り・2本のTCPサーバー・orchestrator・設定ファイル・Docker構成・排他制御・テスト戦略を設計。仕様書に明記の無かった「アーカイブ名重複の手動/自動判別」「セーブテンプレートの出自」をManager側の設計判断として明文化し、未確定事項に追加した
-- 改訂：ワールド生成方式を変更。事前に焼き込んだテンプレートワールドをコピーする方式（`templateDir`）を廃止し、**`/start`のたびにNeoForge自身へ新規ワールドを生成させ、シード値は都度ランダムにやり直す**方式にした。hardcoreモード・難易度HARDの固定は、テンプレートではなく`hardcore/server.properties`の`hardcore=true`（バニラ標準機能、ランタイムAPI不要）で行い、Managerは`/start`時にこの値が外れていないか保証する（3節・9節・10節）。これに伴い14節の未確定事項も「テンプレートの出自」から「`server.properties`等の初期セットアップ手順」へ差し替えた
+- 改訂：ワールド生成方式を変更。事前に焼き込んだテンプレートワールドをコピーする方式（`templateDir`）を廃止し、**`/start`のたびにNeoForge自身へ新規ワールドを生成させ、シード値は都度ランダムにやり直す**方式にした。hardcoreモード・難易度HARDの固定は、テンプレートではなく`hardcore/server.properties`の`hardcore=true`（バニラ標準機能、ランタイムAPI不要）で行う（3節・9節・10節）。これに伴い14節の未確定事項も「テンプレートの出自」から「`server.properties`等の初期セットアップ手順」へ差し替えた（**注**：この時点ではManagerが`/start`時にこの値が外れていないか保証する仕組みも導入したが、後の改訂で廃止した。詳細は末尾参照）
 - 追記：`config.yml`の読み込み元パスを明記。Managerは`--config`フラグ（デフォルト`./config.yml`、＝プロセスのカレントディレクトリ直下）で指定されたパスを読む。Docker運用時はコンテナの`WORKDIR`を固定することでデフォルト値のまま運用できる（9節）
 - 実装：`cmd/manager`・`internal/{config,state,process,archive,records,ndjson,modserver,gateserver,orchestrator}`一式を実装し、`go build`・`go vet`・`go test -race`が通ることを確認。加えて実バイナリを起動し、Gate役・MOD役のTCPクライアントで`/start force`→アーカイブ→`/load latest force`→SIGTERM終了までエンドツーエンドに動作確認した。この過程で本ドキュメントの2箇所を実装に合わせて修正：
   - **8節の疑似コードの手順順序を修正**：opMutexをrunningチェックより先に獲得する当初案だと、先発の`/start`がシーケンス全体を終えるまでopMutexを握り続けるため、後発の`/start`は2節が主張する「即座に拒否」ではなく長時間ブロックされてしまう矛盾があった。`state.TryMarkStarting`（ロック不要のアトミック処理）を先に行い、opMutexは実際のファイル/プロセス操作の直前でのみ獲得する順序に改めた。あわせて、仕様書には無かった失敗時のstate復旧方針（どこまで進んだかに応じて直前状態へ戻す／`unknown`／`stopped`を使い分ける）を明文化した
@@ -474,3 +475,4 @@ hardcore MOD・Gate本体が別リポジトリのため、実MOD・実Gateを繋
   - 対応1：`start-failed`/`load-failed`/`deactivate-failed`（`reason`・`recovered`付き、`docs/protocol-gate-manager.md` 3.5b節）を新設し、受理後の失敗を必ずGateへ通知するようにした（8節・8a節）
   - 対応2：`process.Stop()`失敗・`ready`タイムアウトの2箇所（いずれも「停止・起動できたか不明」で`phase`を動かせずにいた箇所）で、`port.ProcessRunner.IsRunning()`によりプロセスの生死を再確認するようにした。生きていないと確認できた場合は`phase`を`stopped`へ戻し（`recovered=true`、以降のコマンドは即座に再試行可能）、確認できない場合のみ`recovered=false`のまま`phase`を維持する（生きているプロセスと`world/`・ポートを共有する新しいプロセスを二重起動する危険を避けるため、ここは安全側に倒したまま）
   - `recovered=false`のまま抜け出す手段は依然として無く（14節未確定事項に追加）、Manager自体の再起動が唯一の復旧手段のまま残っている
+- **【設計変更】Managerによる`hardcore=true`保証（`EnsureHardcoreMode`）を廃止**：不要と判断されたため、`/start`・`/load`のたびに`server.properties`の`hardcore=true`を読み取り検証し書き戻す処理（3節・8節手順5a）を削除する方針に改めた。`hardcore=true`・`level-seed=`（空）を維持する責務は初期セットアップ側のみが負い、Managerは`server.properties`の中身に一切関知しない（3節・9節・10節・14節を本方針に合わせて更新）。実装（`port.WorldPreparer.EnsureHardcoreMode`・`adapter/osprocess.Runner.EnsureHardcoreMode`とその呼び出し箇所・テスト）は別途対応する
