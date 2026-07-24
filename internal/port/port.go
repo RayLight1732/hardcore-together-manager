@@ -91,8 +91,6 @@ type WorldPreparer interface {
 	// WipeWorld removes world/ so the caller can either let a fresh world
 	// generate (Start) or copy an archive into it (Load).
 	WipeWorld() error
-	// EnsureHardcoreMode makes sure server.properties has hardcore=true.
-	EnsureHardcoreMode() error
 	// Exists reports whether world/ is present — used by /start（clean無し）
 	// to reject with "ワールドが存在しません" (architecture-manager.md 3節・8a節).
 	Exists() (bool, error)

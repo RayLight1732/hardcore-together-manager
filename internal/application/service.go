@@ -186,9 +186,6 @@ func (s *ChallengeApplicationService) startClean(ctx context.Context, requestID,
 		if err := s.deps.World.WipeWorld(); err != nil {
 			return fmt.Errorf("wipe world: %w", err)
 		}
-		if err := s.deps.World.EnsureHardcoreMode(); err != nil {
-			return fmt.Errorf("ensure hardcore mode: %w", err)
-		}
 		return nil
 	}
 
@@ -265,11 +262,6 @@ func (s *ChallengeApplicationService) Load(ctx context.Context, requestID string
 		}
 		if err := s.deps.Archive.Restore(resolvedName); err != nil {
 			return err
-		}
-		// server.properties lives outside world/ and so isn't touched by
-		// restoring an archive; guard it the same defensive way Start does.
-		if err := s.deps.World.EnsureHardcoreMode(); err != nil {
-			return fmt.Errorf("ensure hardcore mode: %w", err)
 		}
 		return nil
 	}

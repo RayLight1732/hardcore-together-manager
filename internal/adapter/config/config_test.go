@@ -159,9 +159,6 @@ func TestHardcorePaths(t *testing.T) {
 	if got, want := h.RecordsPath(), filepath.Join("hardcore", "records"); got != want {
 		t.Errorf("RecordsPath() = %q, want %q", got, want)
 	}
-	if got, want := h.ServerPropertiesPath(), filepath.Join("hardcore", "server.properties"); got != want {
-		t.Errorf("ServerPropertiesPath() = %q, want %q", got, want)
-	}
 }
 
 func TestArchiveNamedDir(t *testing.T) {

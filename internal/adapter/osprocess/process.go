@@ -1,7 +1,7 @@
 // Package osprocess implements port.ProcessRunner and port.WorldPreparer by
 // managing the hardcore server as an os/exec child process
 // (architecture-manager.md 3節): start/stop with a SIGTERM→SIGKILL
-// escalation, and (worldgen.go) preparing world/ for a fresh /start or a
+// escalation, and (worldgen.go) wiping world/ for a fresh /start or a
 // /load restore. It also tracks the child's PID in a small file so a
 // freshly (re)started Manager can detect and reap an orphaned hardcore
 // process left behind by a crashed (not gracefully shut down) previous
@@ -34,11 +34,10 @@ var (
 
 // Runner manages exactly one hardcore process at a time, rooted at workDir.
 type Runner struct {
-	workDir              string
-	worldDir             string
-	serverPropertiesPath string
-	command              []string
-	pidFilePath          string
+	workDir     string
+	worldDir    string
+	command     []string
+	pidFilePath string
 
 	mu     sync.Mutex
 	cmd    *exec.Cmd
@@ -46,17 +45,16 @@ type Runner struct {
 }
 
 // New builds a Runner that launches command (argv[0] is the executable)
-// with workDir as its working directory. world/ and server.properties are
-// resolved relative to workDir (spec 11節). pidFilePath (empty to disable)
-// is where the running child's PID is recorded for orphan detection
-// (ReapOrphan, architecture-manager.md 3節).
+// with workDir as its working directory. world/ is resolved relative to
+// workDir (spec 11節). pidFilePath (empty to disable) is where the running
+// child's PID is recorded for orphan detection (ReapOrphan,
+// architecture-manager.md 3節).
 func New(workDir string, command []string, pidFilePath string) *Runner {
 	return &Runner{
-		workDir:              workDir,
-		worldDir:             filepath.Join(workDir, "world"),
-		serverPropertiesPath: filepath.Join(workDir, "server.properties"),
-		command:              command,
-		pidFilePath:          pidFilePath,
+		workDir:     workDir,
+		worldDir:    filepath.Join(workDir, "world"),
+		command:     command,
+		pidFilePath: pidFilePath,
 	}
 }
 
