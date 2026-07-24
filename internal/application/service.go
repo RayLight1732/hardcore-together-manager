@@ -118,17 +118,23 @@ func (s *ChallengeApplicationService) HandleRunningChanged(running bool) {
 // Only while phase is ready (nothing asked the process to stop) does a
 // disconnect indicate something needs distinguishing: if the process
 // itself is still alive, it's the safe-side "just the TCP link dropped"
-// case (running -> unknown); if the process has died on its own (e.g. the
-// JVM crashed), there's nothing left that could send a late
-// running-changed to correct an unknown guess, so the last persisted value
-// (adapter/fsstate) is kept as-is instead.
+// case (running -> unknown, phase stays ready); if the process has died on
+// its own (e.g. the JVM crashed), there's nothing left that could send a
+// late running-changed to correct an unknown guess, so the last persisted
+// running value (adapter/fsstate) is kept as-is — but phase must still
+// drop back to stopped (MarkDeactivated leaves running untouched), or
+// spec 2.1節's state ④ (進行中×停止中) is never reached and every
+// subsequent /start（clean無し）is wrongly rejected with "既に起動していま
+// す" forever, even though no process is actually running.
 func (s *ChallengeApplicationService) HandleDisconnect() {
 	if s.deps.State.Snapshot().Phase != challenge.PhaseReady {
 		return
 	}
 	if s.deps.Process.IsRunning() {
 		s.deps.State.MarkUnknown()
+		return
 	}
+	s.deps.State.MarkDeactivated()
 }
 
 // HandleArchiveRequest carries out spec 3.2節's archive-request handling:
