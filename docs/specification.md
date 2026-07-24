@@ -236,10 +236,12 @@ Managerはhardcoreプロセスのライフサイクル（`os/exec`での起動/�
 5.5節の`records/<challengeId>.json`（MOD管理、hardcoreサーバーのセーブフォルダの外）とは別物である点に注意：`archive/`はワールドの実体（セーブデータそのもの、Manager管理）、`records/`はイベントの記録（メタデータのみ、MOD管理）という役割分担になっている。
 
 **`name`の生成元と名前の重複**：`archive-request`の`name`は**任意フィールド**であり、その有無だけでManagerの挙動が一意に決まる（手動/自動を区別する専用フィールドは持たない、6節）。
-- **`name`を送った場合**（手動`/archive <name>`）：MOD指定の`name`をそのまま使う。`archive/<name>/`が既に存在する場合は`archive-request`を拒否する（上書きしない）。MODへ拒否を返し、MODはOPへ「その名前は既に使われています」と表示する
+- **`name`を送った場合**（手動`/archive <name>`）：MOD指定の`name`をそのまま使う。`archive/<name>/`が既に存在する場合は`archive-request`を拒否し、`archive-rejected`（6節）をMODへ返す。MODはOPへ「その名前は既に使われています」と表示する
 - **`name`を省略した場合**（ボス討伐による自動アーカイブ）：**Manager自身が処理時点の現在時刻から`<討伐時点相当の日時>`形式の名前を生成する**（例：`2026-07-18T12-34-56`、秒単位以上の精度を持つタイムスタンプ。討伐時点の日時をMODが計算・整形して送る必要が無くなった）。同一秒内に複数のボスが討伐される稀なケースに備え、衝突時はManager側で末尾に連番を付与して回避する（`2026-07-18T12-34-56-2`等）。拒否せず継続させる
 
 Managerが実際に採用した名前（連番付与後の最終的な名前を含む）は`archive-complete`の`name`でMODへ返す（6節）。MODは5.5節のイベントログへ`archiveName`を記録する際、`name`を省略していた場合はこの`archive-complete`の`name`を使う（MOD側では最終的な名前を事前に知り得ないため）。
+
+**`archive-rejected`の追加経緯（既存の抜けの修正）**：旧設計では名前重複時にManagerが応答を一切返さず、MODは`archive-complete`が一定時間（60秒）来ないことをもって失敗と判断するしかなかった。この間`/archive`コマンドを実行したサーバーのメインスレッドがブロックされ続け（実装上コマンドをメインスレッド上で同期的に処理していたため）、TPS停止・他コマンド処理停止という実害を伴う不具合として実機で見つかった。この問題を修正するため、名前重複時にManagerが即座に`archive-rejected`（6節）を返すようにした。あわせて、`archive-request`／`archive-complete`／`archive-rejected`に`requestId`（6節）を追加した——即時応答により複数の`archive-request`が同一TCP接続上で並行して未処理になりうる（例：手動`/archive`実行中に自動アーカイブが割り込む）ため、従来の「1件ずつ同期的に処理される」という前提（`name`だけで応答を相関できていた根拠）が崩れる。`requestId`はGate⇔Manager間シグナル（7節）で既に採用している相関パターンをそのまま踏襲したもの。
 
 サーバーを動かしたままの安全なコピーには`save-all flush`だけでは不十分（コピー中に次のオートセーブが走ると、一部ファイルだけ新しい状態になった「歪んだ」アーカイブができるリスクがある）。バニラ標準の`save-off`/`save-on`で書き込みを一時停止する手順を踏む：
 
@@ -445,16 +447,21 @@ clear = [
 
 詳細なフィールド定義・具体例・シーケンス図は`docs/protocol-mod-manager.md`を参照。
 
+**`archive-request`／`archive-complete`／`archive-rejected`は`requestId`（string、hardcore MOD側が要求ごとに発行するUUID）を持つ**（下表のペイロード列では省略）。Managerは要求に対応する応答へ、受け取った`requestId`をそのままエコーバックする。同一TCP接続上で複数の`archive-request`が並行して未処理になりうる（手動`/archive`実行中に自動アーカイブが割り込む等）ため、応答がどの要求に対応するかを`name`や到着順に頼らず一意に判別する目的で導入した（Gate⇔Manager間シグナル〔7節〕で既に採用している相関パターンと同じ）。`ready`・`running-changed`は応答を伴わない一方向の通知のため`requestId`を持たない。
+
 | シグナル | 方向 | 発生タイミング | ペイロード |
 |---|---|---|---|
 | `ready` | hardcore MOD → Manager | `ServerStartedEvent`発火時 | `running`（起動直後の`running`値。Managerの3.1節キャッシュの初期値として使う） |
 | `running-changed` | hardcore MOD → Manager | `running`の値が変化するたび（新規作成時の`true`初期化、全滅/挑戦終了系ボス討伐による`false`化） | `running`（変化後の値） |
 | `archive-request` | hardcore MOD → Manager | `/archive <name>`実行時（`save-off`済み） | `name`（**任意。省略時はManagerが自動生成する**。手動/自動を区別する専用フィールドは無く、`name`の有無だけで3.2節の挙動が決まる）, `elapsedTime`（long、秒数） |
 | `archive-complete` | Manager → hardcore MOD | ファイルコピー完了時 | `name`（Managerが実際に採用した最終的なアーカイブ名。MODはこれを受けて`save-on`を実行し、`archive-request`で`name`を省略していた場合は5.5節`archiveName`にもこの値を使う） |
+| `archive-rejected` | Manager → hardcore MOD | `archive-request`の`name`が既存アーカイブと重複していた場合（1回限りの通知、3.2節） | `reason`（文字列、例：「名前 `<name>` は既に使用されています」） |
 
 `archive-request`から`deadPlayerUUID`は削除した。死亡記録は5.5節のイベントログに完全移行しており、セーブ（チェックポイント）イベントに死亡プレイヤー情報を含める理由が無いため。
 
 `archive-request`から`createdAt`も削除した（Manager自身が処理時点の現在時刻から生成するため、MODが送る必要が無い）。同様に、手動/自動を区別する`origin`のようなフィールドは設けず、`name`を**任意**フィールドにするだけに留めた（省略時はManagerが自動生成する）。理由：ボス討伐時の名前・作成日時の生成ロジック（タイムスタンプの整形）をMOD側に持たせる必要が無く、実際にファイルコピーを行うManager側で完結させた方がシンプルになる上、`name`の有無自体が「手動か自動か」を過不足なく表しており、それを表現する専用フィールドを別途持つのは冗長だったため。
+
+`archive-rejected`追加の経緯は3.2節「`archive-rejected`の追加経緯」を参照。
 
 ### 6.1 通信方式：永続TCPソケット＋NDJSON
 
@@ -468,12 +475,13 @@ Gateには`GateService`という組み込みのgRPC/HTTP APIがあるが、こ�
 ```json
 {"type":"ready","running":true}
 {"type":"running-changed","running":false}
-{"type":"archive-request","elapsedTime":600}
-{"type":"archive-request","name":"save1","elapsedTime":600}
-{"type":"archive-complete","name":"2026-07-18T12-00-00"}
+{"type":"archive-request","requestId":"a1b2c3d4-...","elapsedTime":600}
+{"type":"archive-request","requestId":"a1b2c3d4-...","name":"save1","elapsedTime":600}
+{"type":"archive-complete","requestId":"a1b2c3d4-...","name":"2026-07-18T12-00-00"}
+{"type":"archive-rejected","requestId":"a1b2c3d4-...","reason":"名前 save1 は既に使用されています"}
 ```
 
-- **`archive-request`の同期待ち**：MODは送信後、次に届く`archive-complete`を受信するまで待ってから`save-on`を実行する（3.2節の手順）。1つのTCP接続上で`archive-request`は常に1件ずつ・同期的に処理される（MOD側が`archive-complete`を待ってから次の操作へ進む設計のため）ので、`name`を送っていない場合でも取り違えは起きない。`name`を省略していた場合、`archive-complete`の`name`がManagerの生成した実際のアーカイブ名であり、MODは以後この値を使う（5.5節`archiveName`等）
+- **`archive-request`の応答待ち**：MODは送信後、対応する`archive-complete`または`archive-rejected`（`requestId`が一致するもの）を受信するまで待ってから`save-on`を実行する（3.2節の手順）。`requestId`により相関を取るため、同一TCP接続上で複数の`archive-request`が並行して未処理であっても取り違えは起きない。`name`を省略していた場合、`archive-complete`の`name`がManagerの生成した実際のアーカイブ名であり、MODは以後この値を使う（5.5節`archiveName`等）
 - **接続断の扱い**：接続が切れた場合、Managerは自身の`os/exec`ハンドルでプロセスの生死を確認する。**プロセスが生きているのに接続だけが切れている場合**は状態を「不明」とみなし、`running`は安全側（`true`扱い、`/start`・`/load`拒否）にする。**プロセス自体が終了している場合**は「不明」にはせず、直前に永続化していた`running`値をそのまま使う（2.1節「プロセス状態と`running`の永続化」）——プロセスが無い間は新しい`running-changed`が届きようがないので、それを「不明」として扱う理由が無い
 - protobuf/ConnectRPCのような型付けIDLは採用しない。シグナル数が少なく（4種）、既存の技術スタックに揃える必要性より、依存を増やさないシンプルさを優先した
 
@@ -631,6 +639,7 @@ GateとManagerは別プロセスであるため、2節のGateコマンドを実�
   - この再整理には副次的な利点があった：**`/start`（`clean`無し）の受理条件が「プロセスが既に起動中か」（Managerが`os/exec`で直接把握でき、常に正確）だけになり、`unknown`になりうる`running`値を一切参照しなくなった。** これにより`/start`のデッドロックは構造的に発生しなくなる——`running`の永続化（次項）とは独立した、より根本的な解決になっている
   - `running`値をオンメモリのキャッシュではなく**Manager自身のローカルディスクへ永続化**する方式に変更し、Manager自身の再起動をまたいで保持されるようにした。`unknown`（安全側で`true`扱い）は「プロセスは生きているがhardcoreとのTCP接続だけが切れている」場合にのみ限定し、「永続化された値が一度も存在しない」場合は`unknown`ではなく明確に`存在しない`（`running=false`と同じ扱い）とした。この永続化は`/start`のデッドロック解消には不要になったが、引き続き`/load`の`running`チェックの正確性（Manager再起動をまたいでも「挑戦が進行中です」を正しく判定できること）のために必要（2.1節「プロセス状態と`running`の永続化」）
   - 挑戦の状態（`running`：存在しない／進行中／終了）とプロセスの状態（起動中／停止中）を独立した2軸として整理し、両者の組み合わせ6通り（構造的に発生しない1通りを除く）それぞれについて`/start`・`/start clean`・`/load`・`/deactivate`の挙動を確定した（2.1節）
+- 【設計のみ・未実装】`archive-request`の名前重複時、Managerが応答を一切返さずMODが60秒タイムアウトでしか失敗検知できないという既存の抜けを修正するため、`archive-rejected`（`reason`付き）を追加し、`archive-request`／`archive-complete`／`archive-rejected`に`requestId`を追加した（6節・3.2節）。`requestId`はGate⇔Manager間シグナルの`requestId`パターン（7節、上記「message id」相当の決定）を踏襲したもの。即時応答により複数の`archive-request`が並行して未処理になりうるため、従来`name`だけに頼っていた相関を`requestId`ベースに置き換えた。この決定はプロトコル設計のみで、hardcore MOD（Kotlin）・Manager（Go）双方の実装はまだ反映していない。あわせて、MOD側の`/archive`コマンドが現状サーバーのメインスレッドを`archive-complete`受信までブロックする実装になっている点（`/archive`実行中はTPS・他コマンドが停止する）も、`requestId`導入を機に非同期化（コマンドを即座に返し、応答受信時に`CommandSourceStack`経由でOPへ結果を通知する）することが望ましいと判断したが、これも実装は未着手（10節・`architecture-neoforge.md`参照）
 
 ## 10. 未決事項
 
@@ -643,7 +652,7 @@ GateとManagerは別プロセスであるため、2節のGateコマンドを実�
 - lobby/hardcore間でのコード共有（commonモジュール化）の要否
 - ボスMobの具体的なリストと、チェックポイント系/挑戦終了系それぞれへの分類（黄昏の森のどのボスをどちらにするか）
 - `hardcoretogether`のテンプレート由来の`ModBlocks.kt`（`example_block`というカスタムBlockを登録）は「サーバーサイドのみで完結する」制約に反するため、実装時に削除する必要がある
-- **既存の抜け**：`archive-request`が名前重複でManagerに拒否された場合、それを明示的にMODへ伝えるシグナルが6節に存在しない（MODは`archive-complete`が来ないことによる60秒タイムアウトでしか失敗を検知できない）。OPへのエラー表示がこの60秒待ちに引きずられる形になる。将来的に`archive-rejected`のような即時拒否シグナルを追加して解消するのが望ましいが、今回は既存の挙動を変えない範囲に留めた
+- 【解消】`archive-request`が名前重複でManagerに拒否された場合の即時通知シグナル（`archive-rejected`、`requestId`による相関）をプロトコルとして設計済み（6節・3.2節）。**ただし現時点ではドキュメント上の設計のみであり、hardcore MOD（Kotlin）・Manager（Go）双方の実装はまだ反映されていない**。特にMOD側は現状`/archive`コマンドの実行スレッド（サーバーメインスレッド）が`archive-complete`受信まで同期的にブロックする実装になっており、`archive-rejected`を活かすには非同期化（コマンドを即座に返し、応答受信時に`source`経由でOPへ結果を通知する設計）も合わせて必要になる（`architecture-neoforge.md`「未着手・既知の課題」参照）
 - `/deactivate`が「プロセス正常停止」を待つ際のタイムアウト・強制kill方針（`server.properties`の`save-all`〜`stop`が異常に長引いた場合、Managerがどこまで待つか）。3.1節の「停止処理中」状態の抜け時間の上限は未確定
 - **`start-failed`/`load-failed`/`deactivate-failed`の`recovered:false`後の手動復旧手段**（2.1節「受理後に失敗した場合」）：`Process.IsRunning()`でプロセスの生死を確認できず`recovered:false`のまま返した場合、現状は「起動処理中」/「停止処理中」から誰も抜け出せず、`/start`等のコマンドは一律「処理中です」で拒否され続ける。唯一の復旧手段はManager自体の再起動（`phase`は永続化されないため再起動で`停止中`に戻る）。専用の強制復旧コマンド（例：管理者が状態を手動で`停止中`へ戻す）を追加するかは未確定
 
