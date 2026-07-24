@@ -146,7 +146,6 @@ type managerLayout struct {
 	archiveDir  string
 	statePath   string
 	pidFilePath string
-	propsPath   string
 	signalAddr  string
 	gateAddr    string
 	managerBin  string
@@ -161,10 +160,6 @@ func newManagerLayout(t *testing.T, binDir string) *managerLayout {
 	if err := os.MkdirAll(hardcoreDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	propsPath := filepath.Join(hardcoreDir, "server.properties")
-	if err := os.WriteFile(propsPath, []byte("difficulty=easy\nhardcore=false\nlevel-seed=\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 
 	signalPort := freePort(t)
 	gatePort := freePort(t)
@@ -176,7 +171,6 @@ func newManagerLayout(t *testing.T, binDir string) *managerLayout {
 		archiveDir:  filepath.Join(workDir, "archive"),
 		statePath:   filepath.Join(workDir, "state.json"),
 		pidFilePath: filepath.Join(workDir, "hardcore.pid"),
-		propsPath:   propsPath,
 		signalAddr:  fmt.Sprintf("127.0.0.1:%d", signalPort),
 		gateAddr:    fmt.Sprintf("127.0.0.1:%d", gatePort),
 		managerBin:  buildBinary(t, binDir, "manager", "../../cmd/manager"),
@@ -268,14 +262,6 @@ func TestE2E_StartArchiveLoadShutdown(t *testing.T) {
 
 	if msg := stateQuery(t, gateConn, "req-after-start"); msg["state"] != "ready" || msg["running"] != "true" {
 		t.Fatalf("state-response after start clean = %+v, want {ready true}", msg)
-	}
-
-	props, err := os.ReadFile(l.propsPath)
-	if err != nil {
-		t.Fatalf("read server.properties: %v", err)
-	}
-	if !strings.Contains(string(props), "hardcore=true") {
-		t.Fatalf("server.properties = %q, want hardcore=true enforced by Start", props)
 	}
 
 	t.Log("waiting for fakehardcore's automatic archive-request to land on disk")

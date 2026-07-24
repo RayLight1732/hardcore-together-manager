@@ -131,12 +131,6 @@ func (h Hardcore) RecordsPath() string {
 	return filepath.Join(h.WorkDir, h.RecordsDir)
 }
 
-// ServerPropertiesPath is <hardcore.workDir>/server.properties, whose hardcore=true
-// Manager guarantees on every /start (architecture-manager.md 3節).
-func (h Hardcore) ServerPropertiesPath() string {
-	return filepath.Join(h.WorkDir, "server.properties")
-}
-
 // NamedDir is <archive.dir>/<name>, the root of one archived challenge (spec 3.2/11節).
 func (a Archive) NamedDir(name string) string {
 	return filepath.Join(a.Dir, name)

@@ -148,14 +148,12 @@ func (f *fakeProcess) IsRunning() bool {
 }
 
 type fakeWorld struct {
-	mu          sync.Mutex
-	wipeCalls   int
-	ensureCalls int
-	wipeErr     error
-	ensureErr   error
-	exists      bool
-	existsErr   error
-	order       *[]string
+	mu        sync.Mutex
+	wipeCalls int
+	wipeErr   error
+	exists    bool
+	existsErr error
+	order     *[]string
 }
 
 func (f *fakeWorld) WipeWorld() error {
@@ -166,13 +164,6 @@ func (f *fakeWorld) WipeWorld() error {
 		*f.order = append(*f.order, "wipe")
 	}
 	return f.wipeErr
-}
-
-func (f *fakeWorld) EnsureHardcoreMode() error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.ensureCalls++
-	return f.ensureErr
 }
 
 func (f *fakeWorld) Exists() (bool, error) {
@@ -523,8 +514,8 @@ func TestStartResume_HappyPath_NeverTouchesWorldOrEvacuates(t *testing.T) {
 	if err := h.svc.Start(context.Background(), testRequestID, false, "OP"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if h.world.wipeCalls != 0 || h.world.ensureCalls != 0 {
-		t.Errorf("wipeCalls=%d ensureCalls=%d, want 0 (resume must never touch world/)", h.world.wipeCalls, h.world.ensureCalls)
+	if h.world.wipeCalls != 0 {
+		t.Errorf("wipeCalls=%d, want 0 (resume must never touch world/)", h.world.wipeCalls)
 	}
 	if len(h.gate.evacuateCalls) != 0 {
 		t.Errorf("evacuateCalls = %v, want none (nothing was running to evacuate from)", h.gate.evacuateCalls)
@@ -652,9 +643,6 @@ func TestLoad_ExistingArchiveHappyPath(t *testing.T) {
 	}
 	if h.world.wipeCalls != 1 {
 		t.Errorf("wipeCalls = %d, want 1 (world/ must be cleared before Restore copies into it)", h.world.wipeCalls)
-	}
-	if h.world.ensureCalls != 1 {
-		t.Errorf("ensureCalls = %d, want 1 (server.properties guard applies to Load too)", h.world.ensureCalls)
 	}
 }
 
