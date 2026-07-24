@@ -891,19 +891,34 @@ func TestHandleDisconnect_MarksUnknownWhileProcessAlive(t *testing.T) {
 	h.state.MarkReady(true)
 	h.process.running = true
 	h.svc.HandleDisconnect()
-	if snap := h.state.Snapshot(); snap.Running != challenge.RunningUnknown {
+	snap := h.state.Snapshot()
+	if snap.Running != challenge.RunningUnknown {
 		t.Fatalf("running = %v, want unknown", snap.Running)
+	}
+	if snap.Phase != challenge.PhaseReady {
+		t.Fatalf("phase = %v, want ready (unchanged): the process is still alive, only the TCP link dropped", snap.Phase)
 	}
 }
 
-func TestHandleDisconnect_PreservesRunningWhenProcessDead(t *testing.T) {
+// TestHandleDisconnect_ProcessDead_RevertsPhaseButPreservesRunning guards
+// spec 2.1節's state ④ (進行中×停止中): when the process has actually died
+// (not just a TCP hiccup), phase must drop back to stopped — otherwise
+// every later /start（clean無し）is wrongly rejected with "既に起動してい
+// ます" forever, even though nothing is running. running itself is left
+// untouched: a dead process can't send a late running-changed to correct
+// an unknown guess, so overwriting it would be a permanent false alarm.
+func TestHandleDisconnect_ProcessDead_RevertsPhaseButPreservesRunning(t *testing.T) {
 	h := newHarness(t)
 	h.state.MarkReady(true)
-	h.process.running = false // the process itself is gone, only the TCP link dropped is not the case here
+	h.process.running = false // the process itself is gone, not just the TCP link
 
 	h.svc.HandleDisconnect()
-	if snap := h.state.Snapshot(); snap.Running != challenge.RunningTrue {
+	snap := h.state.Snapshot()
+	if snap.Running != challenge.RunningTrue {
 		t.Fatalf("running = %v, want true (unchanged): a dead process can't send a late correction, so unknown would be a permanent false alarm", snap.Running)
+	}
+	if snap.Phase != challenge.PhaseStopped {
+		t.Fatalf("phase = %v, want stopped: a confirmed-dead process must free /start（clean無し）to resume it", snap.Phase)
 	}
 }
 
@@ -922,8 +937,12 @@ func TestHandleDisconnect_IgnoredMidTransition(t *testing.T) {
 	h.process.running = true // still true at the instant the disconnect fires, per the race this guards against
 
 	h.svc.HandleDisconnect()
-	if snap := h.state.Snapshot(); snap.Running != challenge.RunningTrue {
+	snap := h.state.Snapshot()
+	if snap.Running != challenge.RunningTrue {
 		t.Fatalf("running = %v, want unchanged true: mid-transition disconnects must be ignored entirely", snap.Running)
+	}
+	if snap.Phase != challenge.PhaseStopping {
+		t.Fatalf("phase = %v, want unchanged stopping: mid-transition disconnects must be ignored entirely", snap.Phase)
 	}
 }
 
