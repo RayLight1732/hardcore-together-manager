@@ -48,7 +48,7 @@ func main() {
 	}
 	log.Println("fakehardcore: sent ready")
 
-	if err := sendLine(conn, map[string]any{"type": "archive-request", "elapsedTime": 100}); err != nil {
+	if err := sendLine(conn, map[string]any{"type": "archive-request", "requestId": "fakehardcore-archive-1", "elapsedTime": 100}); err != nil {
 		log.Fatalf("fakehardcore: send archive-request: %v", err)
 	}
 	line, err := bufio.NewReader(conn).ReadString('\n')
