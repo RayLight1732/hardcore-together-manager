@@ -124,8 +124,6 @@ MODは`archive-request`送信後、対応する`requestId`を持つ`archive-comp
 
 `archive-rejected`受信時、MODは即座に失敗と判断してOPへ`reason`を表示し、`save-on`を実行する（60秒タイムアウトを待つ必要はない）。`archive-complete`・`archive-rejected`のいずれも一定時間届かない場合は、従来通りタイムアウト（目安60秒、要確定）をもって失敗として扱う（接続断など`archive-rejected`自体が届かない異常系のフォールバック）。
 
-**現状の実装との差分**：Manager（Go、本リポジトリ）側は`requestId`の受信・エコーバックおよび`archive-rejected`の送信に対応済み。一方MOD（Kotlin、別リポジトリ）側の実装はまだ追従しておらず、`archive-request`に`requestId`を付与していない・`archive-rejected`を処理していない状態。加えてMOD側の`/archive`コマンドは現状サーバーのメインスレッドで`archive-complete`受信まで同期的にブロックする実装になっており、`archive-rejected`による即時失敗検知を活かすには、コマンドを非同期化（即座に制御を返し、応答受信時に`CommandSourceStack`経由でOPへ結果を通知する設計）することも合わせて必要になる。
-
 ## 5. 接続断の扱い
 
 TCP接続が切れた場合、Managerは自身の`os/exec`ハンドルでhardcoreプロセスの生死を確認する。
