@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"log"
-	"net"
 
 	"github.com/RayLight1732/hardcore-together-manager/internal/domain/records"
 	"github.com/RayLight1732/hardcore-together-manager/internal/ndjson"
@@ -111,14 +110,13 @@ type senpanResponseMsg struct {
 	Entries   []records.SenpanEntry `json:"entries"`
 }
 
-// handleConn owns one Gate connection end to end: adopted as current on
-// accept, read until disconnect, then forgotten (architecture-manager.md
-// 7節). Unlike modserver, disconnecting a Gate connection doesn't mutate
-// hardcore's state — Gate itself is what treats "no connection" as unknown
-// state on its side (spec 2.1節).
-func (s *Server) handleConn(netConn net.Conn) {
-	conn := ndjson.NewConn(netConn)
-	s.adopt(conn)
+// handleConn owns one Gate connection end to end: already adopted as
+// current by Serve before this goroutine started (see Serve), read until
+// disconnect, then forgotten (architecture-manager.md 7節). Unlike
+// modserver, disconnecting a Gate connection doesn't mutate hardcore's
+// state — Gate itself is what treats "no connection" as unknown state on
+// its side (spec 2.1節).
+func (s *Server) handleConn(conn *ndjson.Conn) {
 	defer func() {
 		conn.Close()
 		s.release(conn)
