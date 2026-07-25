@@ -6,6 +6,7 @@ package fsarchive
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -39,7 +40,7 @@ func New(archiveDir, worldDir string) *Repository {
 // meta.json, resolving the final name via domain/archive's rules. The
 // hardcore process is not touched here — the caller (MOD, already
 // save-off'd) is responsible for that (spec 3.2節).
-func (r *Repository) Save(name string, elapsedTime int64, now time.Time) (string, error) {
+func (r *Repository) Save(name string, elapsedTime int64, now time.Time) (retName string, retErr error) {
 	now = now.UTC()
 	base := domainarchive.DecideBaseName(name, now)
 	manual := name != ""
@@ -50,7 +51,17 @@ func (r *Repository) Save(name string, elapsedTime int64, now time.Time) (string
 	}
 
 	dir := filepath.Join(r.archiveDir, resolved)
-	if err := os.CopyFS(filepath.Join(dir, "world"), os.DirFS(r.worldDir)); err != nil {
+	// dir is newly created by this call (ResolveName guarantees resolved
+	// didn't already exist), so on any failure below it must be removed
+	// rather than left half-populated for the next archive-request to trip
+	// over (e.g. a manual name collision against a previous failed attempt).
+	defer func() {
+		if retErr != nil {
+			os.RemoveAll(dir)
+		}
+	}()
+
+	if err := copyWorldWithRetry(filepath.Join(dir, "world"), os.DirFS(r.worldDir)); err != nil {
 		return "", fmt.Errorf("fsarchive: copy world: %w", err)
 	}
 
@@ -60,6 +71,41 @@ func (r *Repository) Save(name string, elapsedTime int64, now time.Time) (string
 
 	return resolved, nil
 }
+
+// copyWorldWithRetry copies fsys into worldDst via os.CopyFS, retrying a few
+// times if a file present when os.CopyFS's internal fs.WalkDir listed it is
+// gone by the time it gets around to opening it (os.ErrNotExist) — e.g.
+// NeoForge's data/*.dat files (random_sequences.dat, data attachments, etc),
+// which are written via a background worker outside the vanilla save-all
+// path that save-off/save-all flush gates, so they can rarely still be
+// mid-write (or mid-rename) during the copy despite the MOD having already
+// save-off'd/flushed.
+// os.CopyFS aborts the whole walk on the first error and never overwrites an
+// existing destination file, so each retry must start from an empty
+// worldDst, not resume the previous attempt. fsys is a parameter (rather
+// than copyWorldWithRetry calling os.DirFS itself) so tests can inject a
+// fake transient failure without touching the real filesystem.
+func copyWorldWithRetry(worldDst string, fsys fs.FS) error {
+	var lastErr error
+	for attempt := 0; attempt < copyWorldMaxAttempts; attempt++ {
+		if attempt > 0 {
+			if err := os.RemoveAll(worldDst); err != nil {
+				return fmt.Errorf("remove partial copy before retry %d: %w", attempt+1, err)
+			}
+			time.Sleep(copyWorldRetryDelay)
+		}
+		lastErr = os.CopyFS(worldDst, fsys)
+		if lastErr == nil || !os.IsNotExist(lastErr) {
+			return lastErr
+		}
+	}
+	return lastErr
+}
+
+const (
+	copyWorldMaxAttempts = 3
+	copyWorldRetryDelay  = 200 * time.Millisecond
+)
 
 func (r *Repository) dirExists(name string) (bool, error) {
 	return dirExists(filepath.Join(r.archiveDir, name))
