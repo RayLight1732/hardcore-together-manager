@@ -167,11 +167,10 @@ Gate・lobby・Manager（+hardcore）を1つの`docker-compose.yml`で束ねる�
 ## 6. 未確定事項・要確認ポイント（Gate側、実装着手前に確定させたい）
 
 1. **Gate⇔Manager間の接続タイムアウト・リトライ回数**（`managerclient`の実装設定値。`docs/protocol-gate-manager.md`参照）
-2. **`/savedata`の表示形式**：challengeIdごとに区切って表示するか、全challengeIdのイベントを時系列マージして1本のログとして見せるか（`savedata-response`をGate側でどう整形するかの話）
-3. **Manager障害時、Gate側の応答待ちをどう扱うか**：`managerclient`との接続が切れて復帰した際、進行中の`/start`等のコマンド応答待ちをタイムアウトさせるか、再接続後も待ち続けるか
-4. **`docs/protocol-gate-manager.md`の変更フロー**：Gate・Manager別リポジトリ間でプロトコル定義をどう同期するか（どちらのリポジトリを正とするか、バージョニングするか等）
-5. 仕様書10節記載の既存未決事項（PCFバージョン、権限ノード名の最終決定等）はGate側の実装には直接影響しないため本ドキュメントでは追跡のみ
-6. **`/rta`・`/lobby`・退避/自動転送のテスト方法**：`*proxy.Proxy`の実インスタンス（プレイヤー無し、サーバー登録のみ）を作ってテストできるか要調査（7.3節）。できなければ、実Minecraftクライアント（または簡易プロトコルクライアント）を用意する本格的なe2eテストが必要になる
+2. **Manager障害時、Gate側の応答待ちをどう扱うか**：`managerclient`との接続が切れて復帰した際、進行中の`/start`等のコマンド応答待ちをタイムアウトさせるか、再接続後も待ち続けるか
+3. **`docs/protocol-gate-manager.md`の変更フロー**：Gate・Manager別リポジトリ間でプロトコル定義をどう同期するか（どちらのリポジトリを正とするか、バージョニングするか等）
+4. 仕様書10節記載の既存未決事項（PCFバージョン、権限ノード名の最終決定等）はGate側の実装には直接影響しないため本ドキュメントでは追跡のみ
+5. **`/rta`・`/lobby`・退避/自動転送のテスト方法**：`*proxy.Proxy`の実インスタンス（プレイヤー無し、サーバー登録のみ）を作ってテストできるか要調査（7.3節）。できなければ、実Minecraftクライアント（または簡易プロトコルクライアント）を用意する本格的なe2eテストが必要になる
 
 ## 7. テスト戦略
 
@@ -207,4 +206,5 @@ Gate向けのシグナルを受け付ける疑似Manager TCPサーバー。`mana
 - 再改訂：push型`state`シグナルのローカルキャッシュ（`state_cache.go`）を廃止し、Gateが必要な時にManagerへ同期的に問い合わせる`QueryState`方式へ変更（2.1節）。`/start`・`/load`完了時の自動転送だけは`hardcore-ready`という1回限りの通知として`transfer.go`に切り出した（2.4節）。理由の詳細は`docs/protocol-gate-manager.md` 6節・`specification.md` 9節決定ログ参照
 - 実装：`plugins/hardcoretogether/`一式（`plugin.go`, `config.go`, `permissions.go`, `util.go`, `cmd_*.go`, `evacuate.go`, `transfer.go`, `managerclient/client.go`）を実装し、`gate.go`・`config.yml`に反映。Gate v0.68.26では`Player.ID()`が`go.minekube.com/gate/pkg/util/uuid`型を返すため、`github.com/google/uuid`ではなくそちらを使用
 - テスト追加：`internal/mockmanager`（疑似Manager TCPサーバー）を使ったGo統合テスト（7節）。Docker上に実Managerを立てるe2eテストは別リポジトリのManager実装が無いため今回は見送り、プロトコルドキュメント（`docs/protocol-gate-manager.md`）を正としたモックベースのテストで代替した
+- 決定：**`/savedata`の表示形式**（6節旧項目2）を確定。`savedata-response`の`events`はManagerが`challengeId`をまたいで単純にフラット化して返すだけで、時系列マージ済みではない（`docs/architecture-manager.md` 5節）。GateはchallengeIdごとに再グルーピングし、グループ順・グループ内ともタイムスタンプ昇順で表示する構成を採用した（`cmd_records.go`の`formatSaveDataReport`）。challengeIdは`/load`等の入力に使われない表示専用の識別子（`specification.md` 5.5節）なので先頭8文字に短縮し、`elapsedTime`も秒数のままではなく「1時間02分03秒」のような単位表示に整形、`clear`イベントは`trigger.mobId`から名前空間を除いたボス名を添えるようにした
 - 設計変更：`/start`にワールドを触らず起動するだけの既定挙動を持たせ、破壊的な再生成は`/start clean`修飾子に分離した。あわせて`/deactivate`コマンドを新設（`cmd_deactivate.go`）。旧設計には、一度もhardcoreを起動したことが無い状態からでも`/start`が永遠に成功しないデッドロックがあった——Managerの`running`キャッシュはhardcore未接続時に安全側で`true`（進行中）扱いになり、`/start`はこれが`true`の間拒否され、キャッシュを書き換えられるのはhardcore自身が起動して`ready`を送った場合のみだが、そのhardcoreを起動させる`/start`自体が拒否され続ける、という循環だった。Manager自身は`os/exec`によるプロセス起動/停止処理を既に実装・E2E確認済みだった（別リポジトリの`hardcore-together-manager`、`docs/architecture-manager.md`参照）ため、起動する主体が無かったわけではなく、`running`キャッシュがオンメモリでManager自身の再起動のたびに無条件`unknown`へリセットされていたことが根本原因だった（`specification.md` 2.1節「背景」・9節決定ログ参照）。当初は`/activate`・`/deactivate`という4コマンド構成を検討したが、「`/start`と`/activate`の役割分担がコマンド名から読み取れない」という指摘を受け、`/start`自体に`clean`修飾子を持たせる3コマンド構成（`/start [clean]`・`/load [force]`・`/deactivate`）に整理し直した。`/start`（`clean`無し）はワールドの中身（`running`値・`world/`）に触れずhardcoreプロセスの起動/停止のみを行う（旧`/activate`相当）。副次的な利点として、`/start`（`clean`無し）の受理条件が「プロセスが既に起動中か」（Managerが`os/exec`で直接把握でき、常に正確）だけになり、`unknown`になりうる`running`値を一切参照しなくなったため、デッドロックが構造的に発生しなくなった。挑戦の状態（存在しない／進行中／終了）×プロセスの状態（起動中／停止中）の組み合わせごとの`/start`・`/start clean`・`/load`・`/deactivate`の挙動は`specification.md` 2.1節に一覧化した。**本リポジトリはGate側の設計のみを対象とするため（3節参照）、Manager側の対応（`start`の`clean`フィールド対応、`deactivate`ハンドラの追加、`running`値の永続化）は`docs/architecture-manager.md`に反映済み——実コードの変更はManager側リポジトリで別途行う必要がある**
