@@ -3,6 +3,7 @@ package modserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -264,6 +265,43 @@ func TestArchiveRequest_NameConflictSendsArchiveRejected(t *testing.T) {
 	}
 	if msg.RequestID != "req-2" {
 		t.Errorf("archive-rejected requestId = %q, want req-2", msg.RequestID)
+	}
+	if msg.Reason == "" {
+		t.Error("archive-rejected reason is empty, want a human-readable reason")
+	}
+}
+
+func TestArchiveRequest_GenericFailureSendsArchiveRejected(t *testing.T) {
+	// Regression guard: archive-rejected must not be name-conflict-only.
+	// Any HandleArchiveRequest failure (e.g. the world copy itself failing)
+	// must reach the MOD immediately rather than being silently logged and
+	// leaving the MOD to fall back on its own 60s archive-complete timeout
+	// (architecture-manager.md 4節「検討の上、見送り」の撤回）。
+	_, app, dial := testServer(t)
+	app.archiveRequestErr = errors.New("fsarchive: copy world: open data/random_sequences.dat: no such file or directory")
+	client := dial()
+
+	if err := client.Send(archiveRequestMsg{Type: "archive-request", RequestID: "req-3", Name: "", ElapsedTime: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := client.Receive()
+	if err != nil {
+		t.Fatalf("Receive archive-rejected: %v", err)
+	}
+	typ, err := ndjson.Type(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if typ != "archive-rejected" {
+		t.Fatalf("type = %q, want archive-rejected", typ)
+	}
+	var msg archiveRejectedMsg
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		t.Fatal(err)
+	}
+	if msg.RequestID != "req-3" {
+		t.Errorf("archive-rejected requestId = %q, want req-3", msg.RequestID)
 	}
 	if msg.Reason == "" {
 		t.Error("archive-rejected reason is empty, want a human-readable reason")
