@@ -452,7 +452,7 @@ clear = [
 | `running-changed`  | hardcore MOD → Manager | `running`の値が変化するたび（新規作成時の`true`初期化、全滅/挑戦終了系ボス討伐による`false`化） | `running`（変化後の値）                                                                                                                                                    |
 | `archive-request`  | hardcore MOD → Manager | `/archive <name>`実行時（`save-off`済み）                                                       | `name`（**任意。省略時はManagerが自動生成する**。手動/自動を区別する専用フィールドは無く、`name`の有無だけで3.2節の挙動が決まる）, `elapsedTime`（long、秒数）             |
 | `archive-complete` | Manager → hardcore MOD | ファイルコピー完了時                                                                            | `name`（Managerが実際に採用した最終的なアーカイブ名。MODはこれを受けて`save-on`を実行し、`archive-request`で`name`を省略していた場合は5.5節`archiveName`にもこの値を使う） |
-| `archive-rejected` | Manager → hardcore MOD | `archive-request`の`name`が既存アーカイブと重複していた場合（1回限りの通知、3.2節）             | `reason`（文字列、例：「名前 `<name>` は既に使用されています」）                                                                                                           |
+| `archive-rejected` | Manager → hardcore MOD | `archive-request`の処理に失敗した場合（`name`の重複に限らずワールドコピー失敗等あらゆる失敗を含む。1回限りの通知、3.2節） | `reason`（文字列、例：「名前 `<name>` は既に使用されています」）                                                                                                           |
 
 `archive-request`から`deadPlayerUUID`は削除した。死亡記録は5.5節のイベントログに完全移行しており、セーブ（チェックポイント）イベントに死亡プレイヤー情報を含める理由が無いため。
 
@@ -637,7 +637,8 @@ GateとManagerは別プロセスであるため、2節のGateコマンドを実�
   - `running`値をオンメモリのキャッシュではなく**Manager自身のローカルディスクへ永続化**する方式に変更し、Manager自身の再起動をまたいで保持されるようにした。`unknown`（安全側で`true`扱い）は「プロセスは生きているがhardcoreとのTCP接続だけが切れている」場合にのみ限定し、「永続化された値が一度も存在しない」場合は`unknown`ではなく明確に`存在しない`（`running=false`と同じ扱い）とした。この永続化は`/start`のデッドロック解消には不要になったが、引き続き`/load`の`running`チェックの正確性（Manager再起動をまたいでも「挑戦が進行中です」を正しく判定できること）のために必要（2.1節「プロセス状態と`running`の永続化」）
   - 挑戦の状態（`running`：存在しない／進行中／終了）とプロセスの状態（起動中／停止中）を独立した2軸として整理し、両者の組み合わせ6通り（構造的に発生しない1通りを除く）それぞれについて`/start`・`/start clean`・`/load`・`/deactivate`の挙動を確定した（2.1節）
 - 【変更】`archive-request`の名前重複時、Managerが応答を一切返さずMODが60秒タイムアウトでしか失敗検知できないという既存の抜けを修正するため、`archive-rejected`（`reason`付き）を追加し、`archive-request`／`archive-complete`／`archive-rejected`に`requestId`を追加した（6節・3.2節）。`requestId`はGate⇔Manager間シグナルの`requestId`パターン（7節、上記「message id」相当の決定）を踏襲したもの。即時応答により複数の`archive-request`が並行して未処理になりうるため、従来`name`だけに頼っていた相関を`requestId`ベースに置き換えた。
-  あわせて、MOD側の`/archive`コマンド（および自動アーカイブ経路）が現状サーバーのメインスレッドを`archive-complete`受信までブロックする実装になっている点（`/archive`実行中はTPS・他コマンドが停止する）についても、`requestId`導入を機にsend-and-forget＋コールバック方式へ非同期化する設計を確定した（`architecture-neoforge.md`「`/archive`アーカイブ経路の非同期化」節）。本書が定義するワイヤプロトコル自体に変更は無い。実装は未着手
+  あわせて、MOD側の`/archive`コマンド（および自動アーカイブ経路）がサーバーのメインスレッドを`archive-complete`受信までブロックしていた実装（`/archive`実行中はTPS・他コマンドが停止する）についても、`requestId`導入を機にsend-and-forget＋コールバック方式へ非同期化した（`architecture-neoforge.md`「`/archive`アーカイブ経路の非同期化」節、実装済み）。本書が定義するワイヤプロトコル自体に変更は無い
+- 【変更】`archive-rejected`の対象を、名前重複（`ErrNameConflict`）だけでなく`archive-request`の処理に失敗したケース全般（ワールドコピー失敗、`meta.json`書き込み失敗等）へ拡張した（6節・`architecture-manager.md` 4節）。名前重複以外は無応答のまま取り残されており、MODは60秒タイムアウト頼みだった。`reason`は自由文字列のままで、フィールド定義・スキーマの変更は無い
 
 ## 10. 未決事項
 
