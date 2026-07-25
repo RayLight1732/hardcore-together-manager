@@ -65,10 +65,10 @@ com.ray.light.hardcoretogether/
 
 判断ロジック（tick・死亡・チェックポイント・クリア・アーカイブ実行・保存・状態更新）の置き場所には2つの選択肢がある。
 
-| 選択肢 | 内容 | トレードオフ |
-|---|---|---|
-| A: 単一クラス | domainパッケージに置いた1クラスがportに直接依存し、全判断ロジックを持つ | 依存性逆転の原則自体には反しないが、全責務が1クラスに集まるためUseCase・Service・Facadeを兼務する巨大クラスになりやすい。また「domain」という名前のパッケージにportへ依存するクラスが混在し、純粋なdomain（Challenge・Trigger・RecordEvent）との境界が曖昧になる |
-| B: application層で分割（採用） | `application`層を新設し、`ChallengeService`/`ArchiveService`/`RecordService`の3つに責務を分割。全体の調整だけを行う`ChallengeApplicationService`を薄く被せる | クラス数は増えるが、各クラスが単一責務に留まる。真のdomain（Challenge/Trigger/RecordEvent/BossCategory）はportに一切依存しない、より厳密な境界になる |
+| 選択肢                         | 内容                                                                                                                                                         | トレードオフ                                                                                                                                                                                                                                                     |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A: 単一クラス                  | domainパッケージに置いた1クラスがportに直接依存し、全判断ロジックを持つ                                                                                      | 依存性逆転の原則自体には反しないが、全責務が1クラスに集まるためUseCase・Service・Facadeを兼務する巨大クラスになりやすい。また「domain」という名前のパッケージにportへ依存するクラスが混在し、純粋なdomain（Challenge・Trigger・RecordEvent）との境界が曖昧になる |
+| B: application層で分割（採用） | `application`層を新設し、`ChallengeService`/`ArchiveService`/`RecordService`の3つに責務を分割。全体の調整だけを行う`ChallengeApplicationService`を薄く被せる | クラス数は増えるが、各クラスが単一責務に留まる。真のdomain（Challenge/Trigger/RecordEvent/BossCategory）はportに一切依存しない、より厳密な境界になる                                                                                                             |
 
 ## `Challenge`：idと経過時間を持つドメインエンティティ
 
@@ -102,10 +102,10 @@ Minecraftのtick単位すら知らない、「経過ナノ秒を渡されたら�
 
 `Trigger`と`RecordEvent`はどちらも「保存対象のデータ」を持つ。これをファイルに書き出す形（現状はJSON）へどう変換するかには2つの選択肢がある。
 
-| 選択肢 | 内容 | トレードオフ |
-|---|---|---|
-| A: adapter層で集中変換 | domainのTriggerは何のメソッドも持たない純粋なマーカーinterfaceとし、変換は`adapter`層の`when`（Trigger種類ごとに分岐）または実行時レジストリ（`Map<KClass<out Trigger>, ...>`）に集約する | domainはシリアライズ形式を一切知らずに済む。ただし`when`+`else`方式は新しいTrigger実装を追加するたびに中央のファイルを直す必要があり、モジュール外からTriggerを拡張できるようにした意味が薄れる。レジストリ方式はその点を解決するが、「登録し忘れ」が実行時エラーになり、コンパイル時には検出できない |
-| B: Trigger自身が変換を持つ（採用） | `Trigger`（および`RecordEvent`）が構造を自分で語る。`StructuredValue`はJSON・Gsonに依存しない、domain所有の汎用木構造（`Map`や`List`と同格の概念） | 新しい実装は`interface`を満たさない限りコンパイルが通らないため、「登録し忘れ」という状態が構造的に存在しない。adapter層に残る変換は`StructuredValue ⇔ Gson JsonElement`という1つの汎用関数だけになり、Trigger/RecordEventの種類ごとの分岐がadapterのどこにも無くなる。domainが持つのは「ネスト可能な汎用値」という抽象概念であり、Gson/JSONという具体的な表現形式への依存はadapterの`toGson()`側だけに閉じる |
+| 選択肢                             | 内容                                                                                                                                                                                      | トレードオフ                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A: adapter層で集中変換             | domainのTriggerは何のメソッドも持たない純粋なマーカーinterfaceとし、変換は`adapter`層の`when`（Trigger種類ごとに分岐）または実行時レジストリ（`Map<KClass<out Trigger>, ...>`）に集約する | domainはシリアライズ形式を一切知らずに済む。ただし`when`+`else`方式は新しいTrigger実装を追加するたびに中央のファイルを直す必要があり、モジュール外からTriggerを拡張できるようにした意味が薄れる。レジストリ方式はその点を解決するが、「登録し忘れ」が実行時エラーになり、コンパイル時には検出できない                                                                                                         |
+| B: Trigger自身が変換を持つ（採用） | `Trigger`（および`RecordEvent`）が構造を自分で語る。`StructuredValue`はJSON・Gsonに依存しない、domain所有の汎用木構造（`Map`や`List`と同格の概念）                                        | 新しい実装は`interface`を満たさない限りコンパイルが通らないため、「登録し忘れ」という状態が構造的に存在しない。adapter層に残る変換は`StructuredValue ⇔ Gson JsonElement`という1つの汎用関数だけになり、Trigger/RecordEventの種類ごとの分岐がadapterのどこにも無くなる。domainが持つのは「ネスト可能な汎用値」という抽象概念であり、Gson/JSONという具体的な表現形式への依存はadapterの`toGson()`側だけに閉じる |
 
 Bをそのまま`fun describe(): StructuredValue.Obj`という1メソッドで実装すると、返す`Obj`に`"kind"`キーを含めるかどうかは各実装の裁量に委ねられ、**読み取り側（`RawTrigger`/`RecordEventView`）が前提にしている`"kind"`/`"type"`キーの存在をコンパイラは何も保証しない**（書き忘れても型エラーにならず、実行時に初めて壊れる）。そこで`Trigger`/`RecordEvent`は「タグ（`kind`/`type`）」と「タグ以外のデータ（`fields()`）」を別々のメンバーに分離し、`describe()`は両者を合成するだけの**オーバーライド不可な関数**にする。これにより`"kind"`/`"type"`キーの存在はinterfaceの契約（`val kind: String`の実装必須）として構造的に保証される。
 
@@ -362,6 +362,4 @@ class FileRecordRepository(private val dir: Path) : RecordRepository
 
 ## 未着手・既知の課題
 
-- 【設計済み・実装未反映】`archive-request`が名前重複で拒否された場合の即時通知シグナル（`archive-rejected`）と、`archive-request`／`archive-complete`／`archive-rejected`の`requestId`によるリクエスト相関を、プロトコルとして設計した（`docs/protocol-mod-manager.md` 3.3〜3.5節、`specification.md` 3.2節・6節・9節）。ただしこのリポジトリの実装（`TcpGateConnection.kt`の`pendingArchiveCompletions`が`name`のみで相関している点、Manager側`handler.go`が名前重複時に無応答で返す点）はまだこの設計を反映していない
-  - あわせて、`CommandRegistrar.kt`の`/archive`実装がサーバーのメインスレッドで`archive-complete`受信まで同期的にブロックする点（`TcpGateConnection.sendArchiveRequestAndAwait`の`future.get(60, SECONDS)`）も、`requestId`導入を機に非同期化（コマンドを即座に返し、`archive-complete`/`archive-rejected`受信時に`server.execute{}`でメインスレッドへ戻して`CommandSourceStack`経由でOPへ結果を通知する設計）することが望ましいと判断したが、設計・実装ともに未着手。実装時は355行目の「デッドロックの教訓」（Gate接続のreaderスレッド自身の上で、同じ接続の別メッセージを待つ処理をしてはいけない）を踏まえ、応答受信のコールバックは必ず`server.execute{}`でメインスレッドに戻してから`CommandSourceStack`を操作すること
-- Gate（Go実装）自体はこのリポジトリにまだ存在しない。`records/*.json`の直接読み取り（`/savedata`・`/senpan`）はGate側で新規実装する必要がある
+- `CommandRegistrar.kt`の`/archive`実装がサーバーのメインスレッドで`archive-complete`受信まで同期的にブロックする点（`TcpGateConnection.sendArchiveRequestAndAwait`の`future.get(60, SECONDS)`）も、`requestId`導入を機に非同期化（コマンドを即座に返し、`archive-complete`/`archive-rejected`受信時に`server.execute{}`でメインスレッドへ戻して`CommandSourceStack`経由でOPへ結果を通知する設計）することが望ましいと判断したが、設計・実装ともに未着手。実装時は355行目の「デッドロックの教訓」（Gate接続のreaderスレッド自身の上で、同じ接続の別メッセージを待つ処理をしてはいけない）を踏まえ、応答受信のコールバックは必ず`server.execute{}`でメインスレッドに戻してから`CommandSourceStack`を操作すること
