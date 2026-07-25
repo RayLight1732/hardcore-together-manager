@@ -205,7 +205,7 @@ func TestArchiveRequest_Success(t *testing.T) {
 	app.archiveRequestResult = "save1"
 	client := dial()
 
-	if err := client.Send(archiveRequestMsg{Type: "archive-request", Name: "save1", ElapsedTime: 42}); err != nil {
+	if err := client.Send(archiveRequestMsg{Type: "archive-request", RequestID: "req-1", Name: "save1", ElapsedTime: 42}); err != nil {
 		t.Fatalf("send archive-request: %v", err)
 	}
 
@@ -227,6 +227,9 @@ func TestArchiveRequest_Success(t *testing.T) {
 	if msg.Name != "save1" {
 		t.Errorf("archive-complete name = %q, want save1", msg.Name)
 	}
+	if msg.RequestID != "req-1" {
+		t.Errorf("archive-complete requestId = %q, want req-1", msg.RequestID)
+	}
 
 	app.mu.Lock()
 	defer app.mu.Unlock()
@@ -235,28 +238,35 @@ func TestArchiveRequest_Success(t *testing.T) {
 	}
 }
 
-func TestArchiveRequest_NameConflictSendsNoComplete(t *testing.T) {
+func TestArchiveRequest_NameConflictSendsArchiveRejected(t *testing.T) {
 	_, app, dial := testServer(t)
 	app.archiveRequestErr = domainarchive.ErrNameConflict
 	client := dial()
 
-	if err := client.Send(archiveRequestMsg{Type: "archive-request", Name: "save1", ElapsedTime: 1}); err != nil {
+	if err := client.Send(archiveRequestMsg{Type: "archive-request", RequestID: "req-2", Name: "save1", ElapsedTime: 1}); err != nil {
 		t.Fatal(err)
 	}
 
-	// No archive-complete should ever arrive (docs/protocol-mod-manager.md
-	// 7節: no immediate rejection signal exists yet). Confirm silence for a
-	// short window rather than genuinely waiting forever.
-	recvDone := make(chan struct{})
-	go func() {
-		client.Receive() //nolint:errcheck // only used to detect any arrival at all
-		close(recvDone)
-	}()
-
-	select {
-	case <-recvDone:
-		t.Fatal("received a message after a name-conflict archive-request; expected silence")
-	case <-time.After(300 * time.Millisecond):
+	raw, err := client.Receive()
+	if err != nil {
+		t.Fatalf("Receive archive-rejected: %v", err)
+	}
+	typ, err := ndjson.Type(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if typ != "archive-rejected" {
+		t.Fatalf("type = %q, want archive-rejected", typ)
+	}
+	var msg archiveRejectedMsg
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		t.Fatal(err)
+	}
+	if msg.RequestID != "req-2" {
+		t.Errorf("archive-rejected requestId = %q, want req-2", msg.RequestID)
+	}
+	if msg.Reason == "" {
+		t.Error("archive-rejected reason is empty, want a human-readable reason")
 	}
 }
 

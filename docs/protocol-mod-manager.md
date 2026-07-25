@@ -122,7 +122,7 @@ MODは`archive-request`送信後、対応する`requestId`を持つ`archive-comp
 
 `archive-rejected`受信時、MODは即座に失敗と判断してOPへ`reason`を表示し、`save-on`を実行する（60秒タイムアウトを待つ必要はない）。`archive-complete`・`archive-rejected`のいずれも一定時間届かない場合は、従来通りタイムアウト（目安60秒、要確定）をもって失敗として扱う（接続断など`archive-rejected`自体が届かない異常系のフォールバック）。
 
-**現状の実装との差分**：この節はプロトコル設計であり、MOD（Kotlin）・Manager（Go）双方の実装はまだ追従していない。既存実装は`archive-request`に`requestId`を持たず`name`のみで相関を取り、`archive-rejected`も未実装（Managerは名前重複時に無応答のまま）。加えてMOD側の`/archive`コマンドは現状サーバーのメインスレッドで`archive-complete`受信まで同期的にブロックする実装になっており、`archive-rejected`による即時失敗検知を活かすには、コマンドを非同期化（即座に制御を返し、応答受信時に`CommandSourceStack`経由でOPへ結果を通知する設計）することも合わせて必要になる。
+**現状の実装との差分**：Manager（Go、本リポジトリ）側は`requestId`の受信・エコーバックおよび`archive-rejected`の送信に対応済み。一方MOD（Kotlin、別リポジトリ）側の実装はまだ追従しておらず、`archive-request`に`requestId`を付与していない・`archive-rejected`を処理していない状態。加えてMOD側の`/archive`コマンドは現状サーバーのメインスレッドで`archive-complete`受信まで同期的にブロックする実装になっており、`archive-rejected`による即時失敗検知を活かすには、コマンドを非同期化（即座に制御を返し、応答受信時に`CommandSourceStack`経由でOPへ結果を通知する設計）することも合わせて必要になる。
 
 ## 5. 接続断の扱い
 
@@ -169,5 +169,5 @@ sequenceDiagram
 
 - 接続リトライ回数・バックオフ設定値（`specification.md` 10節）
 - Managerが`running`値を永続化する状態ファイルの具体的なパス・フォーマット（`specification.md` 2.1節「プロセス状態と`running`の永続化」。`archiveDir`等と同様、Managerの設定ファイルで指定する想定だが未確定）
-- **`requestId`／`archive-rejected`の実装反映**：3.3〜3.5節・4節はプロトコル設計として確定したが、hardcore MOD（Kotlin）・Manager（Go）双方の実装はまだ追従していない（`specification.md` 9節「message id」相当の決定・10節参照）
+- **`requestId`／`archive-rejected`の実装反映**：Manager（Go）側は対応済み。hardcore MOD（Kotlin、別リポジトリ）側の実装はまだ追従していない（`specification.md` 9節「message id」相当の決定・10節参照）
 - **`/archive`コマンドの非同期化**：現状MOD側の`/archive`はサーバーのメインスレッドで`archive-complete`/`archive-rejected`受信までブロックする同期実装になっている。`requestId`導入により複数の`archive-request`が並行して未処理でも相関できるようになったため、コマンドを即座に返し応答受信時に`CommandSourceStack`経由で結果を通知する非同期実装への変更が望ましいが、設計・実装ともに未着手（`architecture-neoforge.md`「未着手・既知の課題」参照）

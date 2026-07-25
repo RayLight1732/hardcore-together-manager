@@ -3,6 +3,7 @@ package modserver
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 
 	domainarchive "github.com/RayLight1732/hardcore-together-manager/internal/domain/archive"
@@ -21,13 +22,25 @@ type runningChangedMsg struct {
 
 type archiveRequestMsg struct {
 	Type        string `json:"type"`
+	RequestID   string `json:"requestId"`
 	Name        string `json:"name,omitempty"`
 	ElapsedTime int64  `json:"elapsedTime"`
 }
 
 type archiveCompleteMsg struct {
-	Type string `json:"type"`
-	Name string `json:"name"`
+	Type      string `json:"type"`
+	RequestID string `json:"requestId"`
+	Name      string `json:"name"`
+}
+
+// archiveRejectedMsg answers an archive-request whose name collided with an
+// existing archive (docs/protocol-mod-manager.md 3.5節). It's a one-shot
+// immediate rejection, replacing the old silent-drop behavior that left the
+// MOD blocked on its own 60s archive-complete timeout.
+type archiveRejectedMsg struct {
+	Type      string `json:"type"`
+	RequestID string `json:"requestId"`
+	Reason    string `json:"reason"`
 }
 
 // handleConn owns one MOD connection end to end: it becomes "the" current
@@ -109,17 +122,20 @@ func (s *Server) handleArchiveRequest(conn *ndjson.Conn, msg archiveRequestMsg) 
 	name, err := s.app.HandleArchiveRequest(msg.Name, msg.ElapsedTime)
 	if err != nil {
 		if errors.Is(err, domainarchive.ErrNameConflict) {
-			// docs/protocol-mod-manager.md 7節: no immediate rejection signal
-			// exists yet. The MOD detects failure via its own
-			// archive-complete timeout.
 			s.logf("archive-request for %q rejected: name already exists", msg.Name)
+			reason := fmt.Sprintf("名前 %s は既に使用されています", msg.Name)
+			rejected := archiveRejectedMsg{Type: "archive-rejected", RequestID: msg.RequestID, Reason: reason}
+			if err := conn.Send(rejected); err != nil {
+				s.logf("send archive-rejected: %v", err)
+			}
 			return
 		}
 		s.logf("archive-request failed: %v", err)
 		return
 	}
 
-	if err := conn.Send(archiveCompleteMsg{Type: "archive-complete", Name: name}); err != nil {
+	complete := archiveCompleteMsg{Type: "archive-complete", RequestID: msg.RequestID, Name: name}
+	if err := conn.Send(complete); err != nil {
 		s.logf("send archive-complete: %v", err)
 	}
 }
