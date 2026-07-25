@@ -28,7 +28,7 @@ Managerとhardcoreサーバーは`os/exec`の親子プロセスとして**同一
 | `running-changed`  | MOD → Manager | `running`の値が変化するたび（`/start`によるフレッシュ生成時の`true`初期化、全滅/挑戦終了系ボス討伐による`false`化）                                |
 | `archive-request`  | MOD → Manager | `/archive <name>`実行時（`name`あり）、または指定ボス討伐等による自動アーカイブ時（`name`省略）（`save-off`→`save-all flush`実行済みの状態で送信） |
 | `archive-complete` | Manager → MOD | Managerがワールドフォルダのコピーを完了した時                                                                                                      |
-| `archive-rejected` | Manager → MOD | `archive-request`の`name`が既存アーカイブと重複していた場合（1回限りの通知）                                                                       |
+| `archive-rejected` | Manager → MOD | `archive-request`の処理に失敗した場合（`name`が既存アーカイブと重複していた場合に限らず、ワールドコピー失敗等あらゆる失敗を含む。1回限りの通知）    |
 
 ## 3. メッセージ詳細
 
@@ -104,9 +104,9 @@ Manager → MOD。ファイルコピー完了を通知する。MODはこれを�
 
 ### 3.5 `archive-rejected`
 
-Manager → MOD。`archive-request`の`name`が既存アーカイブと重複していた場合の1回限りの通知。
+Manager → MOD。`archive-request`の処理に失敗した場合の1回限りの通知。名前重複（`name`が既存アーカイブと重複）に限らず、Manager側でのワールドコピー失敗等、`archive-request`の処理中に起きたあらゆる失敗を含む（`architecture-manager.md` 4節）。
 
-**背景**：旧設計ではManagerは名前重複を検出しても自身のログに出力するだけで、TCP接続には何も送り返していなかった。MODは`archive-complete`が一定時間（60秒）来ないことをもって失敗と判断するしかなく、その間`/archive`コマンドを実行したサーバーのメインスレッドがブロックされ続ける（実装上コマンドをメインスレッド上で同期的に処理しているため）という実害を伴う不具合が実機で見つかった（`specification.md` 3.2節「`archive-rejected`の追加経緯」）。
+**背景**：旧設計ではManagerは名前重複を検出しても自身のログに出力するだけで、TCP接続には何も送り返していなかった。MODは`archive-complete`が一定時間（60秒）来ないことをもって失敗と判断するしかなく、その間`/archive`コマンドを実行したサーバーのメインスレッドがブロックされ続ける（実装上コマンドをメインスレッド上で同期的に処理しているため）という実害を伴う不具合が実機で見つかった（`specification.md` 3.2節「`archive-rejected`の追加経緯」）。当初は名前重複のみ即時通知の対象としていたが、それ以外の失敗（ワールドコピー失敗等）も同様に無応答のまま取り残されていたため、`HandleArchiveRequest`が失敗する経路すべてを対象に広げた。
 
 | フィールド  | 型     | 必須 | 説明                                                                    |
 | ----------- | ------ | ---- | ----------------------------------------------------------------------- |
@@ -169,4 +169,3 @@ sequenceDiagram
 
 - 接続リトライ回数・バックオフ設定値（`specification.md` 10節）
 - Managerが`running`値を永続化する状態ファイルの具体的なパス・フォーマット（`specification.md` 2.1節「プロセス状態と`running`の永続化」。`archiveDir`等と同様、Managerの設定ファイルで指定する想定だが未確定）
-- 【設計済み・実装未反映】**`/archive`コマンドの非同期化**：現状MOD側の`/archive`（および自動アーカイブ経路）はサーバーのメインスレッドで`archive-complete`/`archive-rejected`受信までブロックする同期実装になっている。`requestId`導入により複数の`archive-request`が並行して未処理でも相関できるようになったことを受け、send-and-forget＋コールバック方式への変更を設計として確定した（`architecture-neoforge.md`「`/archive`アーカイブ経路の非同期化」節）。ワイヤプロトコル自体（本書の内容）に変更は無く、MOD内部の実装のみが対象。実装は未着手

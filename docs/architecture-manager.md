@@ -150,7 +150,7 @@ Managerが内部で持つ状態は2つで、常にペアで扱う（仕様書3.1
 
 1. `now`（呼び出し元のapplication層が`port.Clock`から取得し、`Save`へ渡す。このタイムスタンプを`createdAt`、および`name`省略時は`name`の生成にも使う——両者が同一の値になるよう、必ず1回だけ読んで使い回す）
 2. `domain/archive.DecideBaseName`で基準名を決定：受信した`name`が空でなければそのまま、空（省略）なら`now`を`2026-07-18T12-34-56`形式に整形
-3. `domain/archive.ResolveName`で最終名を決定：`archive/<name>/`が存在すれば、手動なら拒否（`archive-complete`を返さない。7節参照の`archive-rejected`案は未実装）／自動なら末尾へ連番を付与
+3. `domain/archive.ResolveName`で最終名を決定：`archive/<name>/`が存在すれば、手動なら拒否し`archive-rejected`（`docs/protocol-mod-manager.md` 3.5節、`ErrNameConflict`）を返す／自動なら末尾へ連番を付与
 4. `world/` → `archive/<name>/world/`をコピー（hardcoreプロセスは止めない。MOD側が`save-off`→`save-all flush`済みの状態で送ってくる前提、5.2〜5.3節）
 5. `archive/<name>/meta.json`に`{"elapsedTime": ..., "createdAt": now}`を書き込む（仕様書11節でファイル名を確定済み）
 6. 実際に採用した`name`を返す（`adapter/modserver`が`archive-complete{name: ...}`としてMODへ送信）
@@ -163,6 +163,7 @@ Managerが内部で持つ状態は2つで、常にペアで扱う（仕様書3.1
 
 - **`/load`用の復元（`adapter/fsarchive/restore.go`の`Restore`）**：`archive/<name>/world/` → `world/`のコピー。`Restore`自体はコピーのみを行い、`world/`の削除は呼び出し側（`application.ChallengeApplicationService`）の責務とする（`os.CopyFS`は既存ファイルを上書きしないため、コピー前に必ず`world/`を空にしておく必要がある）。**実装時の教訓**：レイヤー分割前の実装で、この削除呼び出しを`Load`の準備処理に配線し忘れ、`/load`実行時に`file exists`エラーで失敗するバグが実際に発生した（`cmd/manager`でManagerを実際に起動し、`/start`→アーカイブ→`/load latest`という一連の操作をエンドツーエンドで試して発見。ユニットテストだけでは`Load`のprepare関数内をモック済みの`ArchiveRepository.Restore`が素通りしてしまい検出できなかった）。8節の疑似コードに`WorldPreparer.WipeWorld`の呼び出しを明記して修正し、レイヤー分割後も維持している
 - **排他制御**：「アーカイブ実行中は`/start`・`/load`をブロックする」（仕様書3.2節）を、`application.ChallengeApplicationService`が内部に持つ1本の`sync.Mutex`（`opMutex`）で実現する。`HandleArchiveRequest`（アーカイブコピー）も、`Start`/`Load`のプロセス再起動シーケンス（8節）も、この同じ`opMutex`を獲得してから実行する。仕様書の文言が「ブロックする」（＝拒否ではなく待たせる）である以上、`TryLock`ではなく`Lock()`（ブロッキング）を使う——アーカイブコピーは通常数秒〜数十秒で終わる短時間処理なので、`/start`・`/load`側が多少待たされても実用上問題ない。**レイヤー分割前は`modserver`にも`opMutex`を共有する必要があったが**（`archive-request`受信時に`modserver`自身がアーカイブ処理を呼んでいたため）、`HandleArchiveRequest`をapplication層に集約した結果、`opMutex`は完全にapplication層内部に閉じ込められるようになった（cmd/manager側で`*sync.Mutex`を作って複数箇所へ配る必要が無くなった）
+- **`archive-rejected`を名前重複以外の失敗にも拡張**：`adapter/modserver.handleArchiveRequest`は、`HandleArchiveRequest`が返すエラーの種類を問わず必ず`archive-rejected`を1つ返すようにした（従来は`ErrNameConflict`だけを特別扱いし、それ以外はログ出力のみでMODに無応答のまま返していた）。`ResolveName`の`exists`チェック自体のI/Oエラー、`fsarchive`のワールドコピー失敗、`meta.json`書き込み失敗等、いずれも同じ経路でMODへ即座に伝わる。理由の文面（`reason`）は、名前重複のみ従来通りの定型文（「名前 %s は既に使用されています」）、それ以外は元のエラー文字列をそのまま含める——`/archive`はOP専用コマンド（権限レベル2）であり、内部エラーの生の文言を見せる方がトラブルシュートに資すると判断した。新しいメッセージ種別は追加していない（`archive-rejected`の`reason`は元々自由文字列であり、区別する実益がMOD側に無いため）。一度は「実機で見つかったENOENTの原因はMOD側〔`hardcore-together-neoforge`の`IOUtilities.waitUntilIOWorkerComplete()`呼び出し漏れ〕だったので見送る」と判断したが、ディスクフル・権限エラー等**その他の未知のエラーも起こりうる**ため、Manager側としても網羅的に即時通知する方針に改めた
 
 ## 5. 挑戦記録の読み取り（`domain/records` + `port.RecordsRepository` + `adapter/fsrecords`）
 
@@ -431,7 +432,7 @@ hardcore MOD・Gate本体が別リポジトリのため、実MOD・実Gateを繋
 2. **`evacuate-complete`待ち・`ready`待ちのタイムアウト秒数**（8節・9節）：Gate側の`architecture-gate.md`にも関連する未確定事項があり、双方のリポジトリで値を揃える必要がある
 3. **Gate⇔Manager間の接続タイムアウト・リトライ回数**（`docs/protocol-gate-manager.md` 5節と共通）
 4. **MOD⇔Manager間の接続リトライ回数・バックオフ設定値**（`docs/protocol-mod-manager.md` 7節と共通）
-5. **`archive-request`拒否の即時通知**（`archive-rejected`案、仕様書10節・`docs/protocol-mod-manager.md` 7節と共通の未決事項）：現状MOD側は`archive-complete`のタイムアウト（目安60秒）でしか失敗を検知できない
+5. ~~**`archive-request`拒否の即時通知**（`archive-rejected`案）~~：**解決済み（4節）**。名前重複（`ErrNameConflict`）だけでなく、`HandleArchiveRequest`が返すあらゆる失敗を`archive-rejected`で即座に通知するようにした。`archive-complete`/`archive-rejected`のいずれも一定時間届かない場合のタイムアウト（目安60秒）は、接続断など応答自体が届かない異常系のフォールバックとしてのみ残る（`docs/protocol-mod-manager.md` 4節）
 6. ~~**Manager障害時の再接続後の再同期手順**~~：**解決済み（2節・3節・8a節）**。Manager自体がクラッシュ→再起動した場合、`os/exec`の子プロセス（hardcore）への再アタッチはサポートしない——`phase`は常に`stopped`で再初期化し、ユーザーが明示的に`/start`（`clean`無し）を呼んで新しい子プロセスを起動し直す。挑戦の進行状態（`running`）だけは`state.json`（2節）から復元するため、進行中の挑戦を`/start`一発で（ワールドを破棄せず）再開できる。**ただしこれは`SIGTERM`によるグレースフルシャットダウンの場合の話であり**、Manager自体が`panic`・OOM Kill・`SIGKILL`で即死し子プロセスが孤児として生き残るケースは、3節のPIDファイルによる生存確認・強制終了で別途対処する
 7. **`docs/protocol-gate-manager.md`・`docs/protocol-mod-manager.md`の変更フロー**：3リポジトリ（Gate・Manager・hardcore MOD）間でプロトコル定義をどう同期するか
 8. **`state.json`の書き込み失敗時の扱い**（2節）：ディスクフル・権限エラー等で永続化書き込みが失敗した場合、`SetRunning`/`MarkReady`自体を失敗させてオンメモリの状態もロールバックするか、オンメモリだけは更新してログ警告に留めるか未確定
@@ -476,3 +477,4 @@ hardcore MOD・Gate本体が別リポジトリのため、実MOD・実Gateを繋
   - 対応2：`process.Stop()`失敗・`ready`タイムアウトの2箇所（いずれも「停止・起動できたか不明」で`phase`を動かせずにいた箇所）で、`port.ProcessRunner.IsRunning()`によりプロセスの生死を再確認するようにした。生きていないと確認できた場合は`phase`を`stopped`へ戻し（`recovered=true`、以降のコマンドは即座に再試行可能）、確認できない場合のみ`recovered=false`のまま`phase`を維持する（生きているプロセスと`world/`・ポートを共有する新しいプロセスを二重起動する危険を避けるため、ここは安全側に倒したまま）
   - `recovered=false`のまま抜け出す手段は依然として無く（14節未確定事項に追加）、Manager自体の再起動が唯一の復旧手段のまま残っている
 - **【設計変更】Managerによる`hardcore=true`保証（`EnsureHardcoreMode`）を廃止**：不要と判断されたため、`/start`・`/load`のたびに`server.properties`の`hardcore=true`を読み取り検証し書き戻す処理（3節・8節手順5a）を削除する方針に改めた。`hardcore=true`・`level-seed=`（空）を維持する責務は初期セットアップ側のみが負い、Managerは`server.properties`の中身に一切関知しない（3節・9節・10節・14節を本方針に合わせて更新）。実装（`port.WorldPreparer.EnsureHardcoreMode`・`adapter/osprocess.Runner.EnsureHardcoreMode`とその呼び出し箇所・テスト）は別途対応する
+- **既存の記述の修正＋`archive-rejected`を名前重複以外の失敗にも拡張**：4節step3・14節5.が実装当時のまま更新されておらず、名前重複時の`archive-rejected`が「未実装」「未決定」と書かれたままだったのを実態に合わせて修正した上で、`archive-rejected`の対象を`HandleArchiveRequest`のあらゆる失敗（`ResolveName`の`exists`チェックI/Oエラー、`fsarchive`のワールドコピー失敗、`meta.json`書き込み失敗等）に拡張した（4節）。実機で見つかった`fsarchive: copy world`のENOENTという直接の動機自体はMOD側の修正（`hardcore-together-neoforge`の`architecture-neoforge.md`参照、`IOUtilities.waitUntilIOWorkerComplete()`）で解消済みだが、ディスクフル・権限エラー等**その他の未知のエラーも起こりうる**ため、Manager側としても網羅的に即時通知する方針に改めた。`adapter/modserver/handler.go`・`handler_test.go`を実装・テストし、`go build`・`go vet`・`go test ./...`（`internal/e2e`含む）で確認済み
