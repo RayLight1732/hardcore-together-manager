@@ -3,6 +3,7 @@ package gateserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -442,18 +443,24 @@ func TestNoActiveConnection_ReturnsError(t *testing.T) {
 }
 
 func TestNewConnection_ReplacesOldOne(t *testing.T) {
+	// first.Receive() blocks on the socket with no deadline of its own, so
+	// it must get an explicit read deadline here — otherwise a bug that
+	// makes the server fail to close the old connection hangs this test for
+	// the full 10-minute test-binary timeout instead of failing in ~2s.
 	_, _, dial := testServer(t)
 	first := dial()
 	second := dial()
 	_ = second
 
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if _, err := first.Receive(); err != nil {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("old Gate connection was never closed after a new one connected")
-		}
+	if err := first.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	_, err := first.Receive()
+	if err == nil {
+		t.Fatal("expected the old Gate connection's Receive to return an error once replaced")
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		t.Fatal("old Gate connection was never closed after a new one connected")
 	}
 }

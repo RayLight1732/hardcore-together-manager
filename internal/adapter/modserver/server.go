@@ -83,13 +83,24 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	}()
 
 	for {
-		conn, err := ln.Accept()
+		netConn, err := ln.Accept()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
 			return fmt.Errorf("modserver: accept: %w", err)
 		}
+		// adopt runs here, synchronously in the single-threaded Accept
+		// loop, rather than inside handleConn's goroutine: two connections
+		// accepted back to back must become "current" in Accept order.
+		// Spawning handleConn's goroutine first and letting it call adopt
+		// itself leaves that order up to the Go scheduler, which can (and
+		// under back-to-back Accepts, reliably does — see
+		// TestNewConnection_ReplacesOldOne) run the newer goroutine before
+		// the older one, adopting them in reverse and leaving the actually-
+		// new connection closed instead of the stale one.
+		conn := ndjson.NewConn(netConn)
+		s.adopt(conn)
 		go s.handleConn(conn)
 	}
 }

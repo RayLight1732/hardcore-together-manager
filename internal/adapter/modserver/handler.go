@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 
 	domainarchive "github.com/RayLight1732/hardcore-together-manager/internal/domain/archive"
 	"github.com/RayLight1732/hardcore-together-manager/internal/ndjson"
@@ -45,13 +44,12 @@ type archiveRejectedMsg struct {
 	Reason    string `json:"reason"`
 }
 
-// handleConn owns one MOD connection end to end: it becomes "the" current
-// connection on accept, is read until disconnect, and on disconnect notifies
-// Application (docs/protocol-mod-manager.md 5節) and forgets itself as
-// current (architecture-manager.md 6節).
-func (s *Server) handleConn(netConn net.Conn) {
-	conn := ndjson.NewConn(netConn)
-	s.adopt(conn)
+// handleConn owns one MOD connection end to end: already adopted as current
+// by Serve before this goroutine started (see Serve), it is read until
+// disconnect, and on disconnect notifies Application
+// (docs/protocol-mod-manager.md 5節) and forgets itself as current
+// (architecture-manager.md 6節).
+func (s *Server) handleConn(conn *ndjson.Conn) {
 	defer func() {
 		conn.Close()
 		s.release(conn)

@@ -13,6 +13,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 )
 
 // maxLine bounds a single NDJSON message. savedata-response can list every
@@ -74,6 +75,12 @@ func (c *Conn) Receive() (json.RawMessage, error) {
 // Close closes the underlying connection.
 func (c *Conn) Close() error {
 	return c.conn.Close()
+}
+
+// SetReadDeadline forwards to the underlying connection, bounding the next
+// Receive call. A zero value disables the deadline (see net.Conn).
+func (c *Conn) SetReadDeadline(t time.Time) error {
+	return c.conn.SetReadDeadline(t)
 }
 
 // envelope extracts just the `type` discriminator that every message in
