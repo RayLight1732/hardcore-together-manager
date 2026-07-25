@@ -33,10 +33,12 @@ type archiveCompleteMsg struct {
 	Name      string `json:"name"`
 }
 
-// archiveRejectedMsg answers an archive-request whose name collided with an
-// existing archive (docs/protocol-mod-manager.md 3.5節). It's a one-shot
-// immediate rejection, replacing the old silent-drop behavior that left the
-// MOD blocked on its own 60s archive-complete timeout.
+// archiveRejectedMsg answers any archive-request that HandleArchiveRequest
+// failed on — a name collision with an existing archive, or any other
+// failure (e.g. the world copy itself failing; docs/protocol-mod-manager.md
+// 3.5節, architecture-manager.md 4節). It's a one-shot immediate rejection,
+// replacing the old silent-drop behavior that left the MOD blocked on its
+// own 60s archive-complete timeout.
 type archiveRejectedMsg struct {
 	Type      string `json:"type"`
 	RequestID string `json:"requestId"`
@@ -123,14 +125,13 @@ func (s *Server) handleArchiveRequest(conn *ndjson.Conn, msg archiveRequestMsg) 
 	if err != nil {
 		if errors.Is(err, domainarchive.ErrNameConflict) {
 			s.logf("archive-request for %q rejected: name already exists", msg.Name)
-			reason := fmt.Sprintf("名前 %s は既に使用されています", msg.Name)
-			rejected := archiveRejectedMsg{Type: "archive-rejected", RequestID: msg.RequestID, Reason: reason}
-			if err := conn.Send(rejected); err != nil {
-				s.logf("send archive-rejected: %v", err)
-			}
-			return
+		} else {
+			s.logf("archive-request failed: %v", err)
 		}
-		s.logf("archive-request failed: %v", err)
+		rejected := archiveRejectedMsg{Type: "archive-rejected", RequestID: msg.RequestID, Reason: archiveRejectReason(err, msg.Name)}
+		if err := conn.Send(rejected); err != nil {
+			s.logf("send archive-rejected: %v", err)
+		}
 		return
 	}
 
@@ -138,4 +139,17 @@ func (s *Server) handleArchiveRequest(conn *ndjson.Conn, msg archiveRequestMsg) 
 	if err := conn.Send(complete); err != nil {
 		s.logf("send archive-complete: %v", err)
 	}
+}
+
+// archiveRejectReason renders a human-readable reason for archiveRejectedMsg.
+// Name collisions get the specific, actionable wording that's been there
+// since archive-rejected's introduction; everything else falls back to the
+// underlying error text — the OP running /archive has permission level 2
+// (a trusted operator), so surfacing the real error is more useful for
+// troubleshooting than flattening it to a generic "failed" message.
+func archiveRejectReason(err error, name string) string {
+	if errors.Is(err, domainarchive.ErrNameConflict) {
+		return fmt.Sprintf("名前 %s は既に使用されています", name)
+	}
+	return fmt.Sprintf("アーカイブに失敗しました: %v", err)
 }
