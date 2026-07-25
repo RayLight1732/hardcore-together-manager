@@ -4,12 +4,12 @@ Paper+Velocity製の既存実装（`hardcore/`配下）をNeoForge+Gate（Gate/M
 
 ## 0. プロジェクト名
 
-| コンポーネント | 名称 | mod id |
-|---|---|---|
-| hardcoreサーバーのMOD | **Hardcore Together** | `hardcoretogether` |
-| lobbyサーバーのMOD | **Parkour Lobby** | `parkourlobby` |
-| プロキシ（Gate拡張） | **Hardcore Together Gate** | — |
-| プロセス管理・アーカイブ・記録参照サービス | **Hardcore Together Manager** | — |
+| コンポーネント                             | 名称                          | mod id             |
+| ------------------------------------------ | ----------------------------- | ------------------ |
+| hardcoreサーバーのMOD                      | **Hardcore Together**         | `hardcoretogether` |
+| lobbyサーバーのMOD                         | **Parkour Lobby**             | `parkourlobby`     |
+| プロキシ（Gate拡張）                       | **Hardcore Together Gate**    | —                  |
+| プロセス管理・アーカイブ・記録参照サービス | **Hardcore Together Manager** | —                  |
 
 「Hardcore Together」は連帯責任（1人でも死ねば全員の挑戦終了）を表す名称。特定MODへの依存が無い汎用フレームワークであることも踏まえ、Twilight Forest等の固有名詞は含めていない（ボスは5.4節の設定ファイルで任意に指定可能）。「Parkour Lobby」は、チェックポイント機能がパルクールコースの中間セーブという位置づけであることを表す。以降、本文では簡潔さのため「hardcore MOD」「lobby MOD」と呼ぶ箇所があるが、いずれも上記の正式名称を指す。
 
@@ -21,14 +21,15 @@ Paper+Velocity製の既存実装（`hardcore/`配下）をNeoForge+Gate（Gate/M
 
 サーバーは2種類、どちらもNeoForge製。プロキシ側は**Gate（接続ルーティング・コマンド仲介）**と**Manager（hardcoreサーバーのプロセスライフサイクル管理・ワールドのバックアップ/アーカイブ・挑戦記録の参照）**の2プロセスで構成する。
 
-| コンポーネント | 役割 |
-|---|---|
-| Hardcore Together Gate | 接続ルーティング、コマンドの受付・権限チェック、hardcore再起動前後のプレイヤー退避・自動転送 |
-| Hardcore Together Manager | hardcoreサーバーのプロセスライフサイクル管理（`os/exec`でhardcoreを子プロセスとして起動/停止/再起動）、ワールドのバックアップ/アーカイブ実行、`running`状態管理、挑戦記録（`records/`）の直接読み取り |
-| Parkour Lobby（lobbyサーバー、NeoForge） | チェックポイント機能を持つ、パルクールコース中心の待機所 |
-| Hardcore Together（hardcoreサーバー、NeoForge） | RTA本体。死亡/討伐判定、タイマー、記録管理 |
+| コンポーネント                                  | 役割                                                                                                                                                                                                  |
+| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Hardcore Together Gate                          | 接続ルーティング、コマンドの受付・権限チェック、hardcore再起動前後のプレイヤー退避・自動転送                                                                                                          |
+| Hardcore Together Manager                       | hardcoreサーバーのプロセスライフサイクル管理（`os/exec`でhardcoreを子プロセスとして起動/停止/再起動）、ワールドのバックアップ/アーカイブ実行、`running`状態管理、挑戦記録（`records/`）の直接読み取り |
+| Parkour Lobby（lobbyサーバー、NeoForge）        | チェックポイント機能を持つ、パルクールコース中心の待機所                                                                                                                                              |
+| Hardcore Together（hardcoreサーバー、NeoForge） | RTA本体。死亡/討伐判定、タイマー、記録管理                                                                                                                                                            |
 
 旧Paper版の`ServerBooster`（プロキシ側でのプロセス管理・バックアップ）と`WorldArchiver`（ゲームサーバー側でのワールドコピー）の役割は、**Managerに統合**する。理由：
+
 - NeoForgeには稼働中サーバーの中で任意名のワールドを動的生成・削除するBukkit相当のAPIが無いため、「新しい挑戦を始める」はサーバープロセスごとの再起動でしか実現できない
 - プロセス管理とファイル操作を1箇所（Manager）に集約した方が、競合状態（同時に`/start`と`/archive`が走る等）を避けやすい
 
@@ -116,31 +117,31 @@ flowchart TB
 
 「挑戦が存在しない」かつ「プロセスが起動中」の組み合わせは構造的に発生しない（プロセスが起動していれば`world/`は必ず存在するため）。以降、実質6通りの組み合わせを扱う。
 
-| コマンド | 権限 | 動作 |
-|---|---|---|
-| `/rta` | 誰でも | hardcoreサーバーが「準備完了」状態なら接続を切り替える。「停止中」「起動処理中」ならその旨を表示するのみ |
-| `/start` | OP | hardcoreプロセスを起動する。**プロセスが既に起動中なら拒否**（「既に起動しています」）。停止中なら、`world/`が無ければ新規作成してから起動し、あれば中身に一切触れず起動するだけ。`running`値は判定に使わない。詳細な状態別挙動は下表参照 |
-| `/start clean` | OP | hardcoreプロセスの状態に関わらず**ワールドを強制的に再生成して起動する**：起動中なら退避→停止、`world/`を削除→新規作成→起動。進行中だった挑戦があれば破棄される。詳細な状態別挙動は下表参照 |
-| `/load <name>` | OP | `archive/<name>`から挑戦を復元して起動する。**`running`が`true`の場合は拒否**（「挑戦が進行中です」）。詳細な状態別挙動は下表参照 |
-| `/load <name> force` | OP | `running`チェックを**スキップ**する`/load <name>`。アーカイブが存在しない場合のエラー表示は通常の`/load <name>`と同じ（`force`はrunningチェックのみを免除するもので、存在チェックまでは免除しない） |
-| `/load latest` | OP | `running`チェックは`/load <name>`と同様。`name`に`latest`を指定した場合、Managerが全アーカイブのメタデータ`createdAt`を比較し、最も新しいものを自動選択して`/load <name>`と同じ処理を行う。アーカイブが1件も無い場合はエラーメッセージを表示して何もしない |
-| `/load latest force` | OP | `/load latest`と`/load <name> force`を組み合わせた動作（最新アーカイブを自動選択しつつ、runningチェックはスキップ） |
-| `/deactivate` | OP | hardcoreプロセスを安全に停止する。**プロセスが既に停止中なら拒否**（「既に停止しています」）。起動中なら退避→停止。ワールドの中身・`running`値は一切変更しない。詳細な状態別挙動は下表参照 |
-| `/lobby` | 誰でも | lobbyサーバーへ接続を切り替える |
-| `/server` | 権限保有者のみ表示 | 旧`ServerCommandRestrictor`相当。無権限者には登録しない |
+| コマンド             | 権限               | 動作                                                                                                                                                                                                                                                       |
+| -------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/rta`               | 誰でも             | hardcoreサーバーが「準備完了」状態なら接続を切り替える。「停止中」「起動処理中」ならその旨を表示するのみ                                                                                                                                                   |
+| `/start`             | OP                 | hardcoreプロセスを起動する。**プロセスが既に起動中なら拒否**（「既に起動しています」）。停止中なら、`world/`が無ければ新規作成してから起動し、あれば中身に一切触れず起動するだけ。`running`値は判定に使わない。詳細な状態別挙動は下表参照                  |
+| `/start clean`       | OP                 | hardcoreプロセスの状態に関わらず**ワールドを強制的に再生成して起動する**：起動中なら退避→停止、`world/`を削除→新規作成→起動。進行中だった挑戦があれば破棄される。詳細な状態別挙動は下表参照                                                                |
+| `/load <name>`       | OP                 | `archive/<name>`から挑戦を復元して起動する。**`running`が`true`の場合は拒否**（「挑戦が進行中です」）。詳細な状態別挙動は下表参照                                                                                                                          |
+| `/load <name> force` | OP                 | `running`チェックを**スキップ**する`/load <name>`。アーカイブが存在しない場合のエラー表示は通常の`/load <name>`と同じ（`force`はrunningチェックのみを免除するもので、存在チェックまでは免除しない）                                                        |
+| `/load latest`       | OP                 | `running`チェックは`/load <name>`と同様。`name`に`latest`を指定した場合、Managerが全アーカイブのメタデータ`createdAt`を比較し、最も新しいものを自動選択して`/load <name>`と同じ処理を行う。アーカイブが1件も無い場合はエラーメッセージを表示して何もしない |
+| `/load latest force` | OP                 | `/load latest`と`/load <name> force`を組み合わせた動作（最新アーカイブを自動選択しつつ、runningチェックはスキップ）                                                                                                                                        |
+| `/deactivate`        | OP                 | hardcoreプロセスを安全に停止する。**プロセスが既に停止中なら拒否**（「既に停止しています」）。起動中なら退避→停止。ワールドの中身・`running`値は一切変更しない。詳細な状態別挙動は下表参照                                                                 |
+| `/lobby`             | 誰でも             | lobbyサーバーへ接続を切り替える                                                                                                                                                                                                                            |
+| `/server`            | 権限保有者のみ表示 | 旧`ServerCommandRestrictor`相当。無権限者には登録しない                                                                                                                                                                                                    |
 
 `/start`・`/start clean`・`/load`の「自動転送」は、保留リストやスナップショットを持たない。hardcoreプロセスが準備完了になった時点（`ready`受信時点）で、そのときlobbyサーバーに接続している全プレイヤーに対して自動接続を行うだけでよい。
 
 **状態別挙動**（①〜⑥は挑戦の状態×プロセスの状態の組み合わせ）
 
-| 状態 | `/start` | `/start clean` | `/load <name> [force]` | `/deactivate` |
-|---|---|---|---|---|
-| ①存在しない×停止中（初回、`/start`未実行） | 受理：`world/`が無いので新規作成 → 起動 → 準備完了で自動転送（③へ） | 受理：`world/`が無いので`/start`と同じ結果（新規作成→起動、③へ） | `force`不要で受理：退避不要 → アーカイブ復元 → 起動 → 自動転送（③または⑤へ、アーカイブの`running`次第） | **拒否**：「既に停止しています」 |
-| ②存在しない×起動中 | *（不変条件により発生しない。プロセス起動中なら`world/`は必ず存在する）* | 同左 | 同左 | 同左 |
-| ③進行中×起動中（通常運用） | **拒否**：「既に起動しています」 | 受理：退避 → 停止 → `world/`削除 → 新規作成 → 起動 → 自動転送（新しい挑戦、③のまま） | `force`無し→拒否「挑戦が進行中です」。`force`有り→退避→停止→復元→起動 → 自動転送（③または⑤へ） | 受理：退避 → プロセス正常停止。`running`値・ワールドは変更しない（④へ遷移し、進行中の挑戦は中断されたまま保持される） |
-| ④進行中×停止中（プロセスのクラッシュ・ホスト再起動直後、または`/deactivate`後） | **受理（新設計の核心）**：`world/`には一切触れず、プロセスを起動するだけ → 準備完了で自動転送（③へ、中断していた挑戦を再開） | 受理：退避不要（誰も接続していない）→`world/`削除 → 新規作成 → 起動 → 自動転送（新しい挑戦、③へ） | `force`無し→拒否「挑戦が進行中です」（プロセス停止中でも`running=true`である限り変わらない）。`force`有り→退避不要→復元→起動 → 自動転送（③または⑤へ） | **拒否**：「既に停止しています」 |
-| ⑤終了×起動中（死亡/クリア直後） | **拒否**：「既に起動しています」（`running=false`でも、プロセスは既に起動しているので`/start`の役目は済んでいる） | 受理：退避（念のため）→ 停止 → `world/`削除 → 新規作成 → 起動 → 自動転送（③へ） | `running=false`のため`force`不要で受理：退避（念のため）→停止→復元→起動 → 自動転送（③または⑤へ） | 受理：退避 → プロセス正常停止（⑥へ遷移） |
-| ⑥終了×停止中 | 受理：`world/`には一切触れず、プロセスを起動するだけ → 自動転送（⑤へ、終了状態のまま再開） | 受理：`world/`削除 → 新規作成 → 起動 → 自動転送（③へ） | `running=false`のため`force`不要で受理：退避不要→復元→起動 → 自動転送（③または⑤へ） | **拒否**：「既に停止しています」 |
+| 状態                                                                            | `/start`                                                                                                                     | `/start clean`                                                                                    | `/load <name> [force]`                                                                                                                                | `/deactivate`                                                                                                         |
+| ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| ①存在しない×停止中（初回、`/start`未実行）                                      | 受理：`world/`が無いので新規作成 → 起動 → 準備完了で自動転送（③へ）                                                          | 受理：`world/`が無いので`/start`と同じ結果（新規作成→起動、③へ）                                  | `force`不要で受理：退避不要 → アーカイブ復元 → 起動 → 自動転送（③または⑤へ、アーカイブの`running`次第）                                               | **拒否**：「既に停止しています」                                                                                      |
+| ②存在しない×起動中                                                              | _（不変条件により発生しない。プロセス起動中なら`world/`は必ず存在する）_                                                     | 同左                                                                                              | 同左                                                                                                                                                  | 同左                                                                                                                  |
+| ③進行中×起動中（通常運用）                                                      | **拒否**：「既に起動しています」                                                                                             | 受理：退避 → 停止 → `world/`削除 → 新規作成 → 起動 → 自動転送（新しい挑戦、③のまま）              | `force`無し→拒否「挑戦が進行中です」。`force`有り→退避→停止→復元→起動 → 自動転送（③または⑤へ）                                                        | 受理：退避 → プロセス正常停止。`running`値・ワールドは変更しない（④へ遷移し、進行中の挑戦は中断されたまま保持される） |
+| ④進行中×停止中（プロセスのクラッシュ・ホスト再起動直後、または`/deactivate`後） | **受理（新設計の核心）**：`world/`には一切触れず、プロセスを起動するだけ → 準備完了で自動転送（③へ、中断していた挑戦を再開） | 受理：退避不要（誰も接続していない）→`world/`削除 → 新規作成 → 起動 → 自動転送（新しい挑戦、③へ） | `force`無し→拒否「挑戦が進行中です」（プロセス停止中でも`running=true`である限り変わらない）。`force`有り→退避不要→復元→起動 → 自動転送（③または⑤へ） | **拒否**：「既に停止しています」                                                                                      |
+| ⑤終了×起動中（死亡/クリア直後）                                                 | **拒否**：「既に起動しています」（`running=false`でも、プロセスは既に起動しているので`/start`の役目は済んでいる）            | 受理：退避（念のため）→ 停止 → `world/`削除 → 新規作成 → 起動 → 自動転送（③へ）                   | `running=false`のため`force`不要で受理：退避（念のため）→停止→復元→起動 → 自動転送（③または⑤へ）                                                      | 受理：退避 → プロセス正常停止（⑥へ遷移）                                                                              |
+| ⑥終了×停止中                                                                    | 受理：`world/`には一切触れず、プロセスを起動するだけ → 自動転送（⑤へ、終了状態のまま再開）                                   | 受理：`world/`削除 → 新規作成 → 起動 → 自動転送（③へ）                                            | `running=false`のため`force`不要で受理：退避不要→復元→起動 → 自動転送（③または⑤へ）                                                                   | **拒否**：「既に停止しています」                                                                                      |
 
 `/start`（`clean`無し）は④→③・⑥→⑤という、**ワールドを変更せずプロセスのみを起動する遷移**を担う（旧`/activate`相当）。`/deactivate`は③→④・⑤→⑥を担う。`/start clean`は**必ず新規ワールドを作るため、常に③（`running=true`）へ遷移する**（5.1節：新規`SavedData`は常に`running=true`で初期化されるため、⑤へ遷移することは無い）。`/load`だけが、復元するアーカイブ自身の`running`値次第で③・⑤どちらへも遷移しうる（アーカイブは`running=true`のまま作成されるのが通常だが、死亡/クリア後に手動`/archive`した場合はアーカイブ自体が`running=false`のスナップショットになりうるため、5.2節）。
 
@@ -192,10 +193,10 @@ GateはManagerから見た状態をローカルにキャッシュせず、`/rta`
 
 ### 2.2 挑戦記録の参照コマンド（どこからでも使用可能）
 
-| コマンド | 権限 | 動作 |
-|---|---|---|
-| `/savedata` | 誰でも | hardcoreサーバーの起動有無に関わらず、5.5節の`records/<challengeId>.json`を全`challengeId`分横断して一覧表示する。MODへの問い合わせは行わない |
-| `/senpan list\|count` | 誰でも | 同上のデータにより、全`challengeId`のイベントログから`type: death`のイベントを集計し、戦犯（死亡したプレイヤー）の一覧・回数を表示する |
+| コマンド              | 権限   | 動作                                                                                                                                          |
+| --------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/savedata`           | 誰でも | hardcoreサーバーの起動有無に関わらず、5.5節の`records/<challengeId>.json`を全`challengeId`分横断して一覧表示する。MODへの問い合わせは行わない |
+| `/senpan list\|count` | 誰でも | 同上のデータにより、全`challengeId`のイベントログから`type: death`のイベントを集計し、戦犯（死亡したプレイヤー）の一覧・回数を表示する        |
 
 実体の読み取りはManagerが行い、Gateは7節のプロトコルでManagerへ問い合わせて表示するだけである（詳細は3.3節）。この設計にした理由は2つ：①Manager・hardcoreは同一コンテナ上にある前提（1節）なので、Manager側はファイルI/Oだけで完結できる、②hardcoreサーバーが停止中でも過去の挑戦記録を閲覧できる方が実用上望ましいため。
 
@@ -236,6 +237,7 @@ Managerはhardcoreプロセスのライフサイクル（`os/exec`での起動/�
 5.5節の`records/<challengeId>.json`（MOD管理、hardcoreサーバーのセーブフォルダの外）とは別物である点に注意：`archive/`はワールドの実体（セーブデータそのもの、Manager管理）、`records/`はイベントの記録（メタデータのみ、MOD管理）という役割分担になっている。
 
 **`name`の生成元と名前の重複**：`archive-request`の`name`は**任意フィールド**であり、その有無だけでManagerの挙動が一意に決まる（手動/自動を区別する専用フィールドは持たない、6節）。
+
 - **`name`を送った場合**（手動`/archive <name>`）：MOD指定の`name`をそのまま使う。`archive/<name>/`が既に存在する場合は`archive-request`を拒否し、`archive-rejected`（6節）をMODへ返す。MODはOPへ「その名前は既に使われています」と表示する
 - **`name`を省略した場合**（ボス討伐による自動アーカイブ）：**Manager自身が処理時点の現在時刻から`<討伐時点相当の日時>`形式の名前を生成する**（例：`2026-07-18T12-34-56`、秒単位以上の精度を持つタイムスタンプ。討伐時点の日時をMODが計算・整形して送る必要が無くなった）。同一秒内に複数のボスが討伐される稀なケースに備え、衝突時はManager側で末尾に連番を付与して回避する（`2026-07-18T12-34-56-2`等）。拒否せず継続させる
 
@@ -271,16 +273,17 @@ Managerは書き込みを行わない（書き込みはhardcore MODの責務）�
 
 ### 4.2 コマンド
 
-| コマンド | 権限 | 動作 |
-|---|---|---|
-| `/checkpoint` | 誰でも | 保存済みチェックポイントへテレポート。未保存ならロビースポーンへ |
-| `/checkpoint reset` | 誰でも | 自分のチェックポイントを削除 |
-| `/checkpoint reset <target>` | `checkpoint.reset` | 対象プレイヤーのチェックポイントを削除 |
-| `/checkpoint give checkpoint_item\|reset_item\|checkpoint_sign\|reset_sign` | 誰でも | 該当アイテムを自分に付与 |
-| `/checkpoint give ... <target>` | `checkpoint.give` | 対象プレイヤーに付与 |
-| `/checkpoint help` | 誰でも | ヘルプ表示（OPには管理者コマンドも追加表示） |
+| コマンド                                                                    | 権限               | 動作                                                             |
+| --------------------------------------------------------------------------- | ------------------ | ---------------------------------------------------------------- |
+| `/checkpoint`                                                               | 誰でも             | 保存済みチェックポイントへテレポート。未保存ならロビースポーンへ |
+| `/checkpoint reset`                                                         | 誰でも             | 自分のチェックポイントを削除                                     |
+| `/checkpoint reset <target>`                                                | `checkpoint.reset` | 対象プレイヤーのチェックポイントを削除                           |
+| `/checkpoint give checkpoint_item\|reset_item\|checkpoint_sign\|reset_sign` | 誰でも             | 該当アイテムを自分に付与                                         |
+| `/checkpoint give ... <target>`                                             | `checkpoint.give`  | 対象プレイヤーに付与                                             |
+| `/checkpoint help`                                                          | 誰でも             | ヘルプ表示（OPには管理者コマンドも追加表示）                     |
 
 チェックポイント用の看板・アイテムは**バニラのアイテム/看板ブロックをそのまま使う**（例：`minecraft:oak_sign`、任意のバニラアイテム）。新規`Item`/`Block`は登録しない（0節の「サーバーサイドのみで完結する」制約のため。カスタムレジストリコンテンツはクライアントにも同期が必要になり、MOD無しの接続ができなくなる）。フラグの持たせ方：
+
 - アイテムは`minecraft:custom_data`（バニラのData Component、任意のNBTを保持できる。クライアントは中身を解釈しないが保持はする）へ、例えば`{"parkourlobby": {"kind": "checkpoint_sign"}}`のようなタグを埋め込む
 - 表示名・Loreはバニラの`minecraft:custom_name`/`minecraft:lore`コンポーネントで独自に付与する（バニラクライアントでも通常のアイテム名/説明文として表示される）
 - 看板は設置後、対応する`BlockEntity`側にも同様のカスタムNBTを保持させ、`PlayerInteractEvent`/設置イベントでこのNBTの有無を見て判定する
@@ -310,9 +313,9 @@ Managerは書き込みを行わない（書き込みはhardcore MODの責務）�
 
 ### 5.2 コマンド（hardcore MODレベル、hardcore接続中のみ使用可能）
 
-| コマンド | 権限 | 動作 |
-|---|---|---|
-| `/archive <name>` | OP | `save-off`→`save-all flush`を実行後、Managerへ`archive-request(name, elapsedTime)`を送信。**`name`が既存アーカイブと重複する場合はManagerに拒否され、OPへエラー表示して終了**（`save-on`のみ実行して中断）。成功時は`archive-complete`受信後に`save-on`で再開。サーバープロセスは止めない。あわせて5.5節のイベントログへ`type: save`（トリガー：実行したOP）を追記する |
+| コマンド          | 権限 | 動作                                                                                                                                                                                                                                                                                                                                                                   |
+| ----------------- | ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/archive <name>` | OP   | `save-off`→`save-all flush`を実行後、Managerへ`archive-request(name, elapsedTime)`を送信。**`name`が既存アーカイブと重複する場合はManagerに拒否され、OPへエラー表示して終了**（`save-on`のみ実行して中断）。成功時は`archive-complete`受信後に`save-on`で再開。サーバープロセスは止めない。あわせて5.5節のイベントログへ`type: save`（トリガー：実行したOP）を追記する |
 
 `/start`・`/load`はhardcore MODには持たせない（Gateレベルのコマンドとして2.1節に記載。理由：hardcoreサーバーが未起動の状態でも呼び出せる必要があるため）。`/savedata`・`/senpan`も同様にhardcore MODには持たせず、Managerが直接読み取る（2.2節・3.3節。理由：hardcore停止中・他バックエンド接続中でも使えるようにするため）。
 
@@ -340,6 +343,7 @@ Managerは書き込みを行わない（書き込みはhardcore MODの責務）�
 
   - 対象ボスの分類は5.4節の設定ファイルで管理する
   - 手動`/archive`コマンドの場合も同様に5.5節へ`type: save`のイベントを追記する。トリガーがMobではなく実行したOPになる点のみ異なる（内部のアーカイブ処理自体は共通）
+
 - 挑戦終了後にlobbyへ戻るのは手動（`/lobby`を自分で打つ）。自動一括転送は行わない
 
 ### 5.4 ボス設定ファイル
@@ -386,9 +390,7 @@ clear = [
 {
   "challengeId": "a1b2c3d4-...",
   "lastKnownElapsedTime": 1500,
-  "events": [
-    { "...": "イベントは種別ごとに以下のいずれかの形" }
-  ]
+  "events": [{ "...": "イベントは種別ごとに以下のいずれかの形" }]
 }
 ```
 
@@ -400,22 +402,17 @@ clear = [
 
 - **`save`**（`/archive`実行時、またはチェックポイント系ボス討伐時）：
   ```json
-  { "type": "save", "elapsedTime": 600, "timestamp": "2026-07-18T12:00:00Z",
-    "archiveName": "2026-07-18T12-00-00",
-    "trigger": { "kind": "boss", "mobId": "twilightforest:naga" } }
+  { "type": "save", "elapsedTime": 600, "timestamp": "2026-07-18T12:00:00Z", "archiveName": "2026-07-18T12-00-00", "trigger": { "kind": "boss", "mobId": "twilightforest:naga" } }
   ```
   手動`/archive`の場合は`trigger`が`{ "kind": "manual", "player": "<実行したOPのUUID>" }`になる
 - **`death`**（プレイヤー死亡時）：
   ```json
-  { "type": "death", "elapsedTime": 900, "timestamp": "2026-07-18T12:05:00Z",
-    "deadPlayer": { "uuid": "...", "name": "Steve" },
-    "killLog": "Steve was slain by Zombie" }
+  { "type": "death", "elapsedTime": 900, "timestamp": "2026-07-18T12:05:00Z", "deadPlayer": { "uuid": "...", "name": "Steve" }, "killLog": "Steve was slain by Zombie" }
   ```
   `killLog`は`LivingDeathEvent`の`DamageSource`から得られるバニラの死亡メッセージ相当の文字列（将来的に攻撃者エンティティ種別等を構造化して追加してもよい）
 - **`clear`**（挑戦終了系ボス討伐時）：
   ```json
-  { "type": "clear", "elapsedTime": 1500, "timestamp": "2026-07-18T12:45:00Z",
-    "trigger": { "kind": "boss", "mobId": "twilightforest:ur_ghast" } }
+  { "type": "clear", "elapsedTime": 1500, "timestamp": "2026-07-18T12:45:00Z", "trigger": { "kind": "boss", "mobId": "twilightforest:ur_ghast" } }
   ```
 
 **経過時間の継続（`/load`時の巻き戻り対策）**
@@ -449,13 +446,13 @@ clear = [
 
 **`archive-request`／`archive-complete`／`archive-rejected`は`requestId`（string、hardcore MOD側が要求ごとに発行するUUID）を持つ**（下表のペイロード列では省略）。Managerは要求に対応する応答へ、受け取った`requestId`をそのままエコーバックする。同一TCP接続上で複数の`archive-request`が並行して未処理になりうる（手動`/archive`実行中に自動アーカイブが割り込む等）ため、応答がどの要求に対応するかを`name`や到着順に頼らず一意に判別する目的で導入した（Gate⇔Manager間シグナル〔7節〕で既に採用している相関パターンと同じ）。`ready`・`running-changed`は応答を伴わない一方向の通知のため`requestId`を持たない。
 
-| シグナル | 方向 | 発生タイミング | ペイロード |
-|---|---|---|---|
-| `ready` | hardcore MOD → Manager | `ServerStartedEvent`発火時 | `running`（起動直後の`running`値。Managerの3.1節キャッシュの初期値として使う） |
-| `running-changed` | hardcore MOD → Manager | `running`の値が変化するたび（新規作成時の`true`初期化、全滅/挑戦終了系ボス討伐による`false`化） | `running`（変化後の値） |
-| `archive-request` | hardcore MOD → Manager | `/archive <name>`実行時（`save-off`済み） | `name`（**任意。省略時はManagerが自動生成する**。手動/自動を区別する専用フィールドは無く、`name`の有無だけで3.2節の挙動が決まる）, `elapsedTime`（long、秒数） |
-| `archive-complete` | Manager → hardcore MOD | ファイルコピー完了時 | `name`（Managerが実際に採用した最終的なアーカイブ名。MODはこれを受けて`save-on`を実行し、`archive-request`で`name`を省略していた場合は5.5節`archiveName`にもこの値を使う） |
-| `archive-rejected` | Manager → hardcore MOD | `archive-request`の`name`が既存アーカイブと重複していた場合（1回限りの通知、3.2節） | `reason`（文字列、例：「名前 `<name>` は既に使用されています」） |
+| シグナル           | 方向                   | 発生タイミング                                                                                  | ペイロード                                                                                                                                                                 |
+| ------------------ | ---------------------- | ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ready`            | hardcore MOD → Manager | `ServerStartedEvent`発火時                                                                      | `running`（起動直後の`running`値。Managerの3.1節キャッシュの初期値として使う）                                                                                             |
+| `running-changed`  | hardcore MOD → Manager | `running`の値が変化するたび（新規作成時の`true`初期化、全滅/挑戦終了系ボス討伐による`false`化） | `running`（変化後の値）                                                                                                                                                    |
+| `archive-request`  | hardcore MOD → Manager | `/archive <name>`実行時（`save-off`済み）                                                       | `name`（**任意。省略時はManagerが自動生成する**。手動/自動を区別する専用フィールドは無く、`name`の有無だけで3.2節の挙動が決まる）, `elapsedTime`（long、秒数）             |
+| `archive-complete` | Manager → hardcore MOD | ファイルコピー完了時                                                                            | `name`（Managerが実際に採用した最終的なアーカイブ名。MODはこれを受けて`save-on`を実行し、`archive-request`で`name`を省略していた場合は5.5節`archiveName`にもこの値を使う） |
+| `archive-rejected` | Manager → hardcore MOD | `archive-request`の`name`が既存アーカイブと重複していた場合（1回限りの通知、3.2節）             | `reason`（文字列、例：「名前 `<name>` は既に使用されています」）                                                                                                           |
 
 `archive-request`から`deadPlayerUUID`は削除した。死亡記録は5.5節のイベントログに完全移行しており、セーブ（チェックポイント）イベントに死亡プレイヤー情報を含める理由が無いため。
 
@@ -501,21 +498,21 @@ GateとManagerは別プロセスであるため、2節のGateコマンドを実�
 
 **全シグナルが`requestId`（string、Gate側が要求ごとに発行するUUID）を持つ**（下表のペイロード列では省略）。Managerは要求に対応する応答へ、受け取った`requestId`をそのままエコーバックする。複数プレイヤーの操作が同一コネクション上で絡んだ場合に、応答がどの要求に対応するかを一意に判別するためのもの（詳細は`docs/protocol-gate-manager.md` 1節）。
 
-| シグナル | 方向 | 発生タイミング | ペイロード |
-|---|---|---|---|
-| `state-query` / `state-response` | Gate → Manager / Manager → Gate | Gateが hardcoreの現在状態を知りたいタイミング（`/rta`実行時など）で都度送信する同期的な問い合わせ | request: なし。response: `state`（`stopped`\|`starting`\|`ready`\|`stopping`）, `running`（`true`\|`false`\|`unknown`） |
-| `hardcore-ready` | Manager → Gate | `/start [clean]`・`/load`の一連処理が完了し、hardcoreが準備完了になった時（1回限りの完了通知） | なし |
-| `start` | Gate → Manager | `/start [clean]`受理時 | `clean`（bool）, `requestedBy`（実行者名） |
-| `load` | Gate → Manager | `/load <name\|latest> [force]`受理時 | `name`, `force`（bool）, `requestedBy` |
-| `deactivate` | Gate → Manager | `/deactivate`受理時 | `requestedBy` |
-| `start-rejected` / `load-rejected` | Manager → Gate | プロセス状態チェック・`running`チェック・アーカイブ存在チェック等で拒否した場合 | `reason`（文字列、例：「既に起動しています」「挑戦が進行中です」「アーカイブ`<name>`は存在しません」） |
-| `deactivate-rejected` | Manager → Gate | プロセス状態チェックで拒否した場合 | `reason`（「既に停止しています」または遷移中「処理中です」） |
-| `evacuate-request` | Manager → Gate | `start`（`clean=true`）/`load`/`deactivate`受理後、プロセスが起動中で止める前（2.3節） | `reason`（`reset`\|`force-reset`\|`deactivate`、2.1節のメッセージ文言切り替えに使用） |
-| `evacuate-complete` | Gate → Manager | 退避（hardcore接続中の全プレイヤーをlobbyへ強制転送）完了時 | なし |
-| `deactivate-complete` | Manager → Gate | `deactivate`によるプロセス停止が完了した時（1回限りの完了通知） | なし |
-| `start-failed` / `load-failed` / `deactivate-failed` | Manager → Gate | `start`・`load`・`deactivate`は**受理した**（`*-rejected`にはならなかった）が、退避・プロセス停止・ワールド準備・プロセス起動・`ready`待ちのいずれかの段階で失敗した場合（1回限りの通知） | `reason`（文字列）, `recovered`（bool。`false`の場合の詳細は2.1節「受理後に失敗した場合」参照） |
-| `savedata-query` / `savedata-response` | Gate → Manager / Manager → Gate | `/savedata`実行時 | request: なし。response: `events`（3.3節の集計結果） |
-| `senpan-query` / `senpan-response` | Gate → Manager / Manager → Gate | `/senpan list\|count`実行時 | request: `mode`（`list`\|`count`）。response: 集計結果 |
+| シグナル                                             | 方向                            | 発生タイミング                                                                                                                                                                            | ペイロード                                                                                                              |
+| ---------------------------------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `state-query` / `state-response`                     | Gate → Manager / Manager → Gate | Gateが hardcoreの現在状態を知りたいタイミング（`/rta`実行時など）で都度送信する同期的な問い合わせ                                                                                         | request: なし。response: `state`（`stopped`\|`starting`\|`ready`\|`stopping`）, `running`（`true`\|`false`\|`unknown`） |
+| `hardcore-ready`                                     | Manager → Gate                  | `/start [clean]`・`/load`の一連処理が完了し、hardcoreが準備完了になった時（1回限りの完了通知）                                                                                            | なし                                                                                                                    |
+| `start`                                              | Gate → Manager                  | `/start [clean]`受理時                                                                                                                                                                    | `clean`（bool）, `requestedBy`（実行者名）                                                                              |
+| `load`                                               | Gate → Manager                  | `/load <name\|latest> [force]`受理時                                                                                                                                                      | `name`, `force`（bool）, `requestedBy`                                                                                  |
+| `deactivate`                                         | Gate → Manager                  | `/deactivate`受理時                                                                                                                                                                       | `requestedBy`                                                                                                           |
+| `start-rejected` / `load-rejected`                   | Manager → Gate                  | プロセス状態チェック・`running`チェック・アーカイブ存在チェック等で拒否した場合                                                                                                           | `reason`（文字列、例：「既に起動しています」「挑戦が進行中です」「アーカイブ`<name>`は存在しません」）                  |
+| `deactivate-rejected`                                | Manager → Gate                  | プロセス状態チェックで拒否した場合                                                                                                                                                        | `reason`（「既に停止しています」または遷移中「処理中です」）                                                            |
+| `evacuate-request`                                   | Manager → Gate                  | `start`（`clean=true`）/`load`/`deactivate`受理後、プロセスが起動中で止める前（2.3節）                                                                                                    | `reason`（`reset`\|`force-reset`\|`deactivate`、2.1節のメッセージ文言切り替えに使用）                                   |
+| `evacuate-complete`                                  | Gate → Manager                  | 退避（hardcore接続中の全プレイヤーをlobbyへ強制転送）完了時                                                                                                                               | なし                                                                                                                    |
+| `deactivate-complete`                                | Manager → Gate                  | `deactivate`によるプロセス停止が完了した時（1回限りの完了通知）                                                                                                                           | なし                                                                                                                    |
+| `start-failed` / `load-failed` / `deactivate-failed` | Manager → Gate                  | `start`・`load`・`deactivate`は**受理した**（`*-rejected`にはならなかった）が、退避・プロセス停止・ワールド準備・プロセス起動・`ready`待ちのいずれかの段階で失敗した場合（1回限りの通知） | `reason`（文字列）, `recovered`（bool。`false`の場合の詳細は2.1節「受理後に失敗した場合」参照）                         |
+| `savedata-query` / `savedata-response`               | Gate → Manager / Manager → Gate | `/savedata`実行時                                                                                                                                                                         | request: なし。response: `events`（3.3節の集計結果）                                                                    |
+| `senpan-query` / `senpan-response`                   | Gate → Manager / Manager → Gate | `/senpan list\|count`実行時                                                                                                                                                               | request: `mode`（`list`\|`count`）。response: 集計結果                                                                  |
 
 `hardcore-ready`受信をもって、Gateは2.1節の「その時点でlobbyに接続している全プレイヤーを自動でhardcoreへ接続」を実行する（旧仕様の`ready`受信と同じ役割。`clean`無しの`/start`経由の起動でも発生する）。`deactivate-complete`受信をもって、Gateはコマンド実行者へ「サーバーを停止しました」と表示する。`state-query`/`state-response`は継続的なキャッシュ同期ではなく、Gateが必要な時に都度問い合わせる方式にしている（`/start`・`/load`はどのみちManager側のチェック・排他ロックを経由するため、Gate側にキャッシュを持たせても問い合わせを省略できず、キャッシュのズレというリスクだけが残るため。詳細は`docs/protocol-gate-manager.md` 6節参照）。
 
@@ -570,22 +567,22 @@ GateとManagerは別プロセスであるため、2節のGateコマンドを実�
 
 （実行元はユーザー視点の説明であり、内部実装上はGateがManagerへ処理を委譲する場合がある。2節・3節・7節参照）
 
-| コマンド | 実行元 | 権限 |
-|---|---|---|
-| `/rta` | Gate（どこからでも） | 誰でも |
-| `/lobby` | Gate（どこからでも） | 誰でも |
-| `/start` | Gate（どこからでも） | OP |
-| `/start clean` | Gate（どこからでも） | OP |
-| `/load <name>` | Gate（どこからでも） | OP |
-| `/load <name> force` | Gate（どこからでも） | OP |
-| `/load latest` | Gate（どこからでも） | OP |
-| `/load latest force` | Gate（どこからでも） | OP |
-| `/deactivate` | Gate（どこからでも） | OP |
-| `/server` | Gate | 権限保有者のみ表示 |
-| `/checkpoint` 系 | lobby MOD | 誰でも／一部OP相当権限 |
-| `/archive <name>` | hardcore MOD（hardcore接続中のみ） | OP |
-| `/savedata` | Gate（どこからでも。hardcore停止中も可、Manager経由でrecords/を読み取り） | 誰でも |
-| `/senpan list\|count` | Gate（どこからでも。hardcore停止中も可、Manager経由でrecords/を読み取り） | 誰でも |
+| コマンド              | 実行元                                                                    | 権限                   |
+| --------------------- | ------------------------------------------------------------------------- | ---------------------- |
+| `/rta`                | Gate（どこからでも）                                                      | 誰でも                 |
+| `/lobby`              | Gate（どこからでも）                                                      | 誰でも                 |
+| `/start`              | Gate（どこからでも）                                                      | OP                     |
+| `/start clean`        | Gate（どこからでも）                                                      | OP                     |
+| `/load <name>`        | Gate（どこからでも）                                                      | OP                     |
+| `/load <name> force`  | Gate（どこからでも）                                                      | OP                     |
+| `/load latest`        | Gate（どこからでも）                                                      | OP                     |
+| `/load latest force`  | Gate（どこからでも）                                                      | OP                     |
+| `/deactivate`         | Gate（どこからでも）                                                      | OP                     |
+| `/server`             | Gate                                                                      | 権限保有者のみ表示     |
+| `/checkpoint` 系      | lobby MOD                                                                 | 誰でも／一部OP相当権限 |
+| `/archive <name>`     | hardcore MOD（hardcore接続中のみ）                                        | OP                     |
+| `/savedata`           | Gate（どこからでも。hardcore停止中も可、Manager経由でrecords/を読み取り） | 誰でも                 |
+| `/senpan list\|count` | Gate（どこからでも。hardcore停止中も可、Manager経由でrecords/を読み取り） | 誰でも                 |
 
 ## 9. 決定ログ
 
@@ -652,7 +649,6 @@ GateとManagerは別プロセスであるため、2節のGateコマンドを実�
 - lobby/hardcore間でのコード共有（commonモジュール化）の要否
 - ボスMobの具体的なリストと、チェックポイント系/挑戦終了系それぞれへの分類（黄昏の森のどのボスをどちらにするか）
 - `hardcoretogether`のテンプレート由来の`ModBlocks.kt`（`example_block`というカスタムBlockを登録）は「サーバーサイドのみで完結する」制約に反するため、実装時に削除する必要がある
-- 【解消】`archive-request`が名前重複でManagerに拒否された場合の即時通知シグナル（`archive-rejected`、`requestId`による相関）をプロトコルとして設計済み（6節・3.2節）。**Manager（Go、本リポジトリ）側はこのプロトコルに追従済み。hardcore MOD（Kotlin、別リポジトリ）側の実装はまだ反映されていない**。特にMOD側は現状`/archive`コマンドの実行スレッド（サーバーメインスレッド）が`archive-complete`受信まで同期的にブロックする実装になっており、`archive-rejected`を活かすには非同期化（コマンドを即座に返し、応答受信時に`source`経由でOPへ結果を通知する設計）も合わせて必要になる（`architecture-neoforge.md`「未着手・既知の課題」参照）
 - `/deactivate`が「プロセス正常停止」を待つ際のタイムアウト・強制kill方針（`server.properties`の`save-all`〜`stop`が異常に長引いた場合、Managerがどこまで待つか）。3.1節の「停止処理中」状態の抜け時間の上限は未確定
 - **`start-failed`/`load-failed`/`deactivate-failed`の`recovered:false`後の手動復旧手段**（2.1節「受理後に失敗した場合」）：`Process.IsRunning()`でプロセスの生死を確認できず`recovered:false`のまま返した場合、現状は「起動処理中」/「停止処理中」から誰も抜け出せず、`/start`等のコマンドは一律「処理中です」で拒否され続ける。唯一の復旧手段はManager自体の再起動（`phase`は永続化されないため再起動で`停止中`に戻る）。専用の強制復旧コマンド（例：管理者が状態を手動で`停止中`へ戻す）を追加するかは未確定
 
@@ -689,11 +685,11 @@ GateとManagerは別プロセスであるため、2節のGateコマンドを実�
 
 **役割の対比**
 
-| パス | 管理主体 | 内容 | `/start`での扱い |
-|---|---|---|---|
-| `<Manager>/<hardcore作業ディレクトリ>/world/` | hardcoreサーバー本体（Managerの子プロセス） | ワールドの実データ＋`SavedData` | 削除・再生成される |
-| `<Manager>/<hardcore作業ディレクトリ>/records/`（`storage.recordsDir`で変更可） | hardcore MOD（書き込み）／Manager（`/savedata`・`/senpan`用の読み取りのみ、3.3節） | 挑戦ごとのイベントログ（JSON） | 削除されない |
-| `<Manager>/<archiveDir>/<name>/` | Manager | アーカイブされたワールドの複製＋メタデータ | 対象外（Manager管理のため） |
-| `<lobby>/world/playerdata/` | lobby MOD（バニラ機構経由） | チェックポイント座標 | 対象外（別サーバー） |
+| パス                                                                            | 管理主体                                                                           | 内容                                       | `/start`での扱い            |
+| ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------ | --------------------------- |
+| `<Manager>/<hardcore作業ディレクトリ>/world/`                                   | hardcoreサーバー本体（Managerの子プロセス）                                        | ワールドの実データ＋`SavedData`            | 削除・再生成される          |
+| `<Manager>/<hardcore作業ディレクトリ>/records/`（`storage.recordsDir`で変更可） | hardcore MOD（書き込み）／Manager（`/savedata`・`/senpan`用の読み取りのみ、3.3節） | 挑戦ごとのイベントログ（JSON）             | 削除されない                |
+| `<Manager>/<archiveDir>/<name>/`                                                | Manager                                                                            | アーカイブされたワールドの複製＋メタデータ | 対象外（Manager管理のため） |
+| `<lobby>/world/playerdata/`                                                     | lobby MOD（バニラ機構経由）                                                        | チェックポイント座標                       | 対象外（別サーバー）        |
 
 `archive/<name>/meta.json`というファイル名は本節で初めて具体化した（3.2節では「メタデータをJSONとして保存する」とだけ書いていた）。実装時に別名にする場合はこの節を更新すること。
