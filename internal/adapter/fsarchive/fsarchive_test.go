@@ -1,6 +1,7 @@
 package fsarchive
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -111,6 +112,96 @@ func TestSave_AutoAppendsSuffixOnCollision(t *testing.T) {
 	}
 	if third != "2026-07-18T12-34-56-3" {
 		t.Errorf("third = %q, want suffix -3", third)
+	}
+}
+
+func TestSave_CleansUpDirOnCopyFailure(t *testing.T) {
+	// Regression guard: a failed Save must not leave a half-populated
+	// archive/<name>/ behind for the next archive-request to trip over
+	// (e.g. as a spurious manual-name collision).
+	clock := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	root := t.TempDir()
+	archiveDir := filepath.Join(root, "archive")
+	worldDir := filepath.Join(root, "missing-world") // deliberately never created
+
+	r := New(archiveDir, worldDir)
+	if _, err := r.Save("save1", 1, clock); err == nil {
+		t.Fatal("expected Save to fail when worldDir does not exist")
+	}
+	if _, err := os.Stat(filepath.Join(archiveDir, "save1")); !os.IsNotExist(err) {
+		t.Errorf("expected archive/save1 to be cleaned up after failed Save, stat err = %v", err)
+	}
+}
+
+// flakyFS wraps an fs.FS and makes Open(failPath) return fs.ErrNotExist for
+// as long as *failsLeft is greater than zero, simulating a file that was
+// listed by os.CopyFS's directory walk but disappeared (mid-write/rename)
+// before the walk got around to opening it.
+type flakyFS struct {
+	fs.FS
+	failPath  string
+	failsLeft *int
+}
+
+func (f *flakyFS) Open(name string) (fs.File, error) {
+	if name == f.failPath && *f.failsLeft > 0 {
+		*f.failsLeft--
+		return nil, fs.ErrNotExist
+	}
+	return f.FS.Open(name)
+}
+
+func TestCopyWorldWithRetry_RetriesTransientNotExist(t *testing.T) {
+	root := t.TempDir()
+	srcDir := filepath.Join(root, "src")
+	if err := os.MkdirAll(filepath.Join(srcDir, "data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "data", "random_sequences.dat"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "level.dat"), []byte("leveldata"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	failsLeft := 1
+	ffs := &flakyFS{FS: os.DirFS(srcDir), failPath: "data/random_sequences.dat", failsLeft: &failsLeft}
+
+	dst := filepath.Join(root, "dst")
+	if err := copyWorldWithRetry(dst, ffs); err != nil {
+		t.Fatalf("copyWorldWithRetry: %v", err)
+	}
+	if failsLeft != 0 {
+		t.Errorf("injected failure was never triggered, failsLeft = %d", failsLeft)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "data", "random_sequences.dat")); err != nil {
+		t.Errorf("random_sequences.dat missing after retry succeeded: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "level.dat")); err != nil {
+		t.Errorf("level.dat missing after retry succeeded: %v", err)
+	}
+}
+
+func TestCopyWorldWithRetry_GivesUpAfterMaxAttempts(t *testing.T) {
+	root := t.TempDir()
+	srcDir := filepath.Join(root, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "level.dat"), []byte("leveldata"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	failsLeft := copyWorldMaxAttempts
+	ffs := &flakyFS{FS: os.DirFS(srcDir), failPath: "level.dat", failsLeft: &failsLeft}
+
+	dst := filepath.Join(root, "dst")
+	err := copyWorldWithRetry(dst, ffs)
+	if err == nil {
+		t.Fatal("expected copyWorldWithRetry to give up and return an error")
+	}
+	if !os.IsNotExist(err) {
+		t.Errorf("copyWorldWithRetry error = %v, want an IsNotExist error", err)
 	}
 }
 
