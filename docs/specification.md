@@ -637,7 +637,7 @@ GateとManagerは別プロセスであるため、2節のGateコマンドを実�
   - `running`値をオンメモリのキャッシュではなく**Manager自身のローカルディスクへ永続化**する方式に変更し、Manager自身の再起動をまたいで保持されるようにした。`unknown`（安全側で`true`扱い）は「プロセスは生きているがhardcoreとのTCP接続だけが切れている」場合にのみ限定し、「永続化された値が一度も存在しない」場合は`unknown`ではなく明確に`存在しない`（`running=false`と同じ扱い）とした。この永続化は`/start`のデッドロック解消には不要になったが、引き続き`/load`の`running`チェックの正確性（Manager再起動をまたいでも「挑戦が進行中です」を正しく判定できること）のために必要（2.1節「プロセス状態と`running`の永続化」）
   - 挑戦の状態（`running`：存在しない／進行中／終了）とプロセスの状態（起動中／停止中）を独立した2軸として整理し、両者の組み合わせ6通り（構造的に発生しない1通りを除く）それぞれについて`/start`・`/start clean`・`/load`・`/deactivate`の挙動を確定した（2.1節）
 - 【変更】`archive-request`の名前重複時、Managerが応答を一切返さずMODが60秒タイムアウトでしか失敗検知できないという既存の抜けを修正するため、`archive-rejected`（`reason`付き）を追加し、`archive-request`／`archive-complete`／`archive-rejected`に`requestId`を追加した（6節・3.2節）。`requestId`はGate⇔Manager間シグナルの`requestId`パターン（7節、上記「message id」相当の決定）を踏襲したもの。即時応答により複数の`archive-request`が並行して未処理になりうるため、従来`name`だけに頼っていた相関を`requestId`ベースに置き換えた。
-  あわせて、MOD側の`/archive`コマンドが現状サーバーのメインスレッドを`archive-complete`受信までブロックする実装になっている点（`/archive`実行中はTPS・他コマンドが停止する）も、`requestId`導入を機に非同期化（コマンドを即座に返し、応答受信時に`CommandSourceStack`経由でOPへ結果を通知する）することが望ましいと判断したが、これも実装は未着手（10節・`architecture-neoforge.md`参照）
+  あわせて、MOD側の`/archive`コマンド（および自動アーカイブ経路）が現状サーバーのメインスレッドを`archive-complete`受信までブロックする実装になっている点（`/archive`実行中はTPS・他コマンドが停止する）についても、`requestId`導入を機にsend-and-forget＋コールバック方式へ非同期化する設計を確定した（`architecture-neoforge.md`「`/archive`アーカイブ経路の非同期化」節）。本書が定義するワイヤプロトコル自体に変更は無い。実装は未着手
 
 ## 10. 未決事項
 

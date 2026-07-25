@@ -342,6 +342,56 @@ class FileRecordRepository(private val dir: Path) : RecordRepository
 
 「クラス名を保存しリフレクションで復元」ではなく「`kind`文字列＋汎用フィールド」という読み取りモデルの設計判断自体は無駄にならない：Gate（Go実装）が`records/*.json`を読む際も、`kind`フィールドが将来のリファクタリング・MOD削除に対して安定した識別子であるという性質はそのまま活きる。単にその読み取りロジックの実装言語・実行プロセスがhardcoretogether（Kotlin）からGate（Go）に移っただけである。
 
+## `/archive`アーカイブ経路の非同期化【設計済み・実装未反映】
+
+### 問題
+
+`ArchiveGatewayImpl.archive()`は`TcpGateConnection.sendArchiveRequestAndAwait()`を介して`archive-complete`/`archive-rejected`（`requestId`相関、`protocol-mod-manager.md` 3.3〜3.5節）を受信するまで同期的にブロックする。この呼び出しは`CommandRegistrar.kt`の`/archive`（Brigadierコマンドディスパッチ）と`DeathCountdown.kt`の`handleBossKill()`（`LivingDeathEvent`ハンドラ）の2箇所から行われ、**どちらもサーバーのメインスレッド上**で発生する。ブロック中はTPSが停止し他コマンドも処理されない実害が`/archive`側で実機で見つかっている（`specification.md` 3.2節「`archive-rejected`の追加経緯」）。`handleBossKill()`側は現状同種のバグ報告は無いが、同じブロッキング呼び出しを経由している以上、構造的には同じ問題を抱えている。
+
+### 方針：send-and-forget化＋コールバック
+
+`TcpGateConnection`を「送って`future.get()`で待つ」実装から、「送って、応答（`archive-complete`/`archive-rejected`、`requestId`相関）を受信したreaderスレッドが登録済みのコールバックを直接呼ぶ」実装に変える。タイムアウトも`future.get(timeout)`ではなく、送信時に別途スケジュールし、応答到着とタイムアウト発火のどちらが先でも二重発火しないようにする（既存の「`requestId`をキーに一度だけ取り出して処理する」パターンをそのまま踏襲する）。
+
+**「デッドロックの教訓」（下記「設計判断まとめ」参照）の遵守**：readerスレッドはコールバックを直接呼ぶが、コールバック自体はメインスレッドへ処理を委譲するだけで即座に返り、readerスレッド上で何かを待つことは一切しない。
+
+### 未接続時はタイムアウトを待たず即座に失敗させる
+
+Gateへ一度も接続できていない、または接続済み後にreaderスレッドが切断を検知した状態（`TcpGateConnection`が接続用ソケット・書き込み用ストリームを持っていない状態）で`archive-request`を送ろうとした場合、実際にはメッセージは送信されずログに警告を出して捨てられるだけになる（既存の送信処理の挙動）。ところがこれまでの実装は、送信できたかどうかを一切見ずに無条件で応答を待つため、**応答が絶対に届かないと分かっている状況でも、律儀に60秒間待ってからタイムアウト扱いにする**。同期実装ではこれがそのままメインスレッドの60秒フリーズになり、非同期化後も、後述のFIFOキューが「直前のリクエストの応答を待ってから次へ進む」直列化をしている都合上、**未接続の間はキューに溜まったリクエスト1件ごとに60秒ずつ浪費してから次に進む**という形で問題が残る。
+
+これを避けるため、送信時点で未接続と分かっている場合は、実際の送信もタイムアウトのスケジュールも行わず、その場（呼び出し元と同じくメインスレッド上）で即座に失敗として扱う。応答を実際に待った上でのタイムアウトと、そもそも送っていない未接続とはOPへ伝えるべき内容が異なる（前者は「Manager側が処理に手間取っている可能性がある」、後者は「Gate接続そのものが切れている」）ため、`ArchiveResult`に両者を区別する新しいケース（未接続を表す値）を追加し、`CommandRegistrar`はこれを受けて「Gateに接続されていません」といった趣旨のメッセージを表示する。接続状態の判定は`TcpGateConnection`が既に持っているソケット・書き込みストリームの有無で足り、新しい状態変数を追加する必要は無い。
+
+この対応により、同期実装で既に起きている「未接続時に60秒フリーズする」問題自体も解消される（非同期化を待たずに直せる部分だが、非同期化と合わせて設計・実装するのが自然なため、ここにまとめて設計した）。なお`ready`・`running-changed`は応答を伴わない一方向の通知であり、そもそも待ち合わせが発生しないため、この設計の対象外である。
+
+### 接続断時：保留中リクエストを即座に解決してからタイムアウト検出用スレッドを止める
+
+`TcpGateConnection`には稼働中に接続が切れた場合の再接続ロジックが無い（起動時の`connect()`が数回リトライして諦めた後は、そのサーバーセッションの間ずっと未接続のままで、再接続を試みる仕組みはどこにも無い）。したがって、readerスレッドが切断を検知した時点（EOF/`IOException`により`socket`/`writer`を`null`へ戻す箇所）で、**その接続はそのセッションにおいてもう二度と使われない**ことが確定する。fast-fail設計により以後`archive()`が呼ばれても新規のタイムアウトタスクは積まれなくなるため、タイムアウト検出用スレッドもこの時点で存在理由を失う——スレッドの生存期間を「サーバープロセス」ではなく「この接続」に結びつけてよい。
+
+ただし、切断検知時点で**まだ応答待ちの`archive-request`が残っている可能性**がある（接続が生きている間に送信済みで、`archive-complete`/`archive-rejected`もタイムアウトもまだ来ていないもの）。これらのコールバックが呼ばれる手段は、本物の応答（readerスレッドは既に死んでいるので二度と来ない）か、スケジュール済みのタイムアウトタスクの発火のいずれかしか無い。ここでタイムアウト検出用スレッドをいきなり止めてスケジュール済みタスクごと切り捨てると、これらのコールバックは永久に呼ばれなくなる。`ArchiveGatewayImpl`のFIFOキューは「コールバックが呼ばれたら次のリクエストへ進む」設計のため、これが起きるとキューが動かなくなったまま止まってしまう——スレッドが残り続けるより深刻な、キューの停止を引き起こす。
+
+そのため切断検知時には、①保留中の全リクエストを取り出し、それぞれのコールバックへ即座に「未接続」相当の結果（前述の`ArchiveResult`の未接続ケースを流用する）を渡して解決してから、②タイムアウト検出用スレッドを止める、という順序で処理する。これにより、切断が起きた瞬間に待たされていたコマンド・ボスキル側もタイムアウトを待たずに即座に失敗通知を受け取れる。「送信時点で未接続なら即失敗」（前節）と対になる、「送信後に接続が切れたら即失敗」という設計であり、考え方に一貫性がある。
+
+### `ArchiveGatewayImpl`：flushもリクエスト間で直列化する
+
+非同期化により、手動`/archive`の応答待ち中に自動アーカイブ（ボスキル）が割り込む、といった**複数の`archive-request`が真に並行してin-flightになる状況**が初めて現実に起こり得るようになる（同期実装ではメインスレッドが1件目の`archive-complete`待ちでブロックされている間、2件目のトリガー自体が発生しようがなかったため、これまでは構造的に起こり得なかった）。この状態で後発リクエストの`archive()`呼び出しが無条件に`save-all flush`を発行すると、**Manager側がまだ先発リクエストのワールドフォルダコピーを実行中である可能性がある**——OSレベルのファイルコピーは原子的ではないため、その最中に後発のflushでディスク上のファイルが書き換わると、先発のアーカイブが新旧混在の歪んだ状態になる。これはsave-off/save-onブラケットが本来防ぐはずだった不具合（3.2節）を、オートセーブではなく明示的な`save-all flush`という別経路から引き起こしてしまう抜けである。
+
+そのため`save-off`だけでなく`save-all flush`自体もリクエスト間で直列化する：`ArchiveGatewayImpl`に未処理リクエストのFIFOキューを持たせ、**次のリクエストのflushは、直前のリクエストの`archive-complete`/`archive-rejected`を受信し終えるまで発行しない**（同時にManagerへ送信済み・応答待ちなのは常に高々1件）。`save-off`はキューが空→非空になった時点の1回だけ、`save-on`はキューが空に戻った時点の1回だけ発行する。この直列化により、複数件溜まっている間は後発リクエストの応答が先発より遅れる（レイテンシの犠牲）が、`archive()`自体はキューに積むだけで即座に返るためメインスレッドは一切ブロックせず、非同期化の目的（TPS停止の解消）は損なわれない。
+
+キューの状態（未処理リクエスト・save-off中かどうか・現在in-flightかどうか）は`AtomicInteger`等の同期プリミティブを使わないただのフィールドでよい：書き換えが起きるのは①`archive()`呼び出し時（呼び出し元は`CommandRegistrar`・`DeathCountdown`のいずれもメインスレッド）と②応答コールバック内（メインスレッドへ処理を委譲した後）の2箇所のみで、どちらも必ずメインスレッド上でしか実行されない（readerスレッドはコールバックを起動するだけでこれらの状態には一切触れない）ため。
+
+### `ArchiveService`／`ChallengeApplicationService`：コールバックの伝播
+
+`archiveWithGeneratedName`・`archive`はいずれも結果を受け取るコールバックを追加で受け取り、`ArchiveGateway`へそのまま渡す形に変える。アーカイブ名の採番はMOD側で完結しているため、非同期化後も呼び出し側へ同期的に返せる。`recordCheckpoint`/`recordClear`が行う記録（`appendSave`/`appendClear`）と`recordClear`の`endChallenge()`（`running-changed: false`送信を含む）は、アーカイブ本体の完了を待たずに従来通りその場で実行する。
+
+**順序に関する検討事項**：これにより、`running-changed: false`が`archive-complete`/`archive-rejected`より先にManagerへ届く順序が生じ得る（従来の同期実装では、アーカイブ完了＝`endChallenge()`実行だったため必ずアーカイブ完了後だった）。問題ないと判断した理由：プロトコル上`running-changed`と`archive-request`系シグナルの間に順序保証は無く、Manager側もこの2つを独立に処理する（`running`の永続化と`archive/`へのコピーは別々の関心事）。`specification.md`・`protocol-mod-manager.md`に順序依存の記述は無いため、この変更で壊れる契約は無い。
+
+### `DeathCountdown`／`CommandRegistrar`：呼び出し側の変更
+
+`DeathCountdown.handleBossKill()`は結果コールバックの中でログ出力するだけに変わる（従来通り記録は結果によらず必ず行う）。
+
+`CommandRegistrar`の`/archive`は、コマンド実行直後に「アーカイブ処理を開始しました」という受理メッセージを即座に返し、実際の成否（`保存完了`／拒否理由／タイムアウト／未接続）は結果コールバックが呼ばれた時点で別途OPへ通知する形に変える。コールバックはコマンド実行から数tick遅れて呼ばれるため、`CommandSourceStack`をその間保持することになるが、`sendSuccess`/`sendFailure`はその時点で送信先が有効である限り安全に呼べる（既存コードも送信者が`ServerPlayer`かどうかをnull許容に扱っている）。**手動`/archive`の記録タイミングは変更しない**：`recordService.appendSave`は従来通りアーカイブ成功時のみ呼ぶ（自動アーカイブ側の「記録は結果によらず必ず行う」という非対称な既存仕様とは意図的に揃えていない、`application`層の項参照）。
+
+手動`/archive`実行中に自動アーカイブが割り込む、といったケースを`/archive`コマンド自体が拒否する必要は無い：`ArchiveGatewayImpl`のキューが自動的に後発リクエストを積んで直列化するため、MOD側で追加の排他制御を持つ理由が無い（`requestId`は各リクエストの応答相関のために引き続き必要）。Manager側は`opMutex`を別途持つ（`architecture-manager.md`参照）が、これはMOD側のキューと独立な、Manager自身の内部状態を守るための排他制御である。
+
 ## 設計判断まとめ
 
 - レイヤー構成：domain / application / port / adapterの4層。判断ロジックを1クラスに集約せず、`ChallengeService`/`ArchiveService`/`RecordService`＋薄い`ChallengeApplicationService`に分割。真のdomain（Challenge/Trigger/RecordEvent/BossCategory）はportに一切依存しない
@@ -362,4 +412,4 @@ class FileRecordRepository(private val dir: Path) : RecordRepository
 
 ## 未着手・既知の課題
 
-- `CommandRegistrar.kt`の`/archive`実装がサーバーのメインスレッドで`archive-complete`受信まで同期的にブロックする点（`TcpGateConnection.sendArchiveRequestAndAwait`の`future.get(60, SECONDS)`）も、`requestId`導入を機に非同期化（コマンドを即座に返し、`archive-complete`/`archive-rejected`受信時に`server.execute{}`でメインスレッドへ戻して`CommandSourceStack`経由でOPへ結果を通知する設計）することが望ましいと判断したが、設計・実装ともに未着手。実装時は355行目の「デッドロックの教訓」（Gate接続のreaderスレッド自身の上で、同じ接続の別メッセージを待つ処理をしてはいけない）を踏まえ、応答受信のコールバックは必ず`server.execute{}`でメインスレッドに戻してから`CommandSourceStack`を操作すること
+- 【設計済み・実装未反映】`CommandRegistrar.kt`の`/archive`実装がサーバーのメインスレッドで`archive-complete`受信まで同期的にブロックする点（`TcpGateConnection.sendArchiveRequestAndAwait`の`future.get(60, SECONDS)`）を、send-and-forget＋コールバック方式へ非同期化する設計を確定した（本ページ「`/archive`アーカイブ経路の非同期化」節）。あわせて、`DeathCountdown.kt`の自動アーカイブ（ボスキル）経路も同じ`ArchiveGateway.archive()`を経由するため同時に非同期化する。実装時の要点：①readerスレッドから直接コールバックを呼ぶが、コールバックは`server.execute{}`へ委譲するだけに留め「デッドロックの教訓」に抵触しないこと、②`ArchiveGatewayImpl`にFIFOキューを持たせ、`save-off`だけでなく`save-all flush`自体もリクエスト間で直列化すること（先発の`archive-request`をManagerがまだコピー中の可能性がある間に後発が無条件で`save-all flush`を発行すると、それだけで歪んだアーカイブを作りうるため）、③未接続時（送信時点で未接続／送信後に接続が切れた場合の両方）は応答を待たず即座に失敗として扱い、タイムアウト検出用スレッドも接続断検知時に保留中リクエストを解決してから止めること
