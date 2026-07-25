@@ -342,15 +342,15 @@ class FileRecordRepository(private val dir: Path) : RecordRepository
 
 「クラス名を保存しリフレクションで復元」ではなく「`kind`文字列＋汎用フィールド」という読み取りモデルの設計判断自体は無駄にならない：Gate（Go実装）が`records/*.json`を読む際も、`kind`フィールドが将来のリファクタリング・MOD削除に対して安定した識別子であるという性質はそのまま活きる。単にその読み取りロジックの実装言語・実行プロセスがhardcoretogether（Kotlin）からGate（Go）に移っただけである。
 
-## `/archive`アーカイブ経路の非同期化【設計済み・実装未反映】
+## `/archive`アーカイブ経路の非同期化
 
 ### 問題
 
-`ArchiveGatewayImpl.archive()`は`TcpGateConnection.sendArchiveRequestAndAwait()`を介して`archive-complete`/`archive-rejected`（`requestId`相関、`protocol-mod-manager.md` 3.3〜3.5節）を受信するまで同期的にブロックする。この呼び出しは`CommandRegistrar.kt`の`/archive`（Brigadierコマンドディスパッチ）と`DeathCountdown.kt`の`handleBossKill()`（`LivingDeathEvent`ハンドラ）の2箇所から行われ、**どちらもサーバーのメインスレッド上**で発生する。ブロック中はTPSが停止し他コマンドも処理されない実害が`/archive`側で実機で見つかっている（`specification.md` 3.2節「`archive-rejected`の追加経緯」）。`handleBossKill()`側は現状同種のバグ報告は無いが、同じブロッキング呼び出しを経由している以上、構造的には同じ問題を抱えている。
+`ArchiveGatewayImpl.archive()`は`TcpGateConnection.sendArchiveRequestAndAwait()`を介して`archive-complete`/`archive-rejected`（`requestId`相関、`protocol-mod-manager.md` 3.3〜3.5節）を受信するまで同期的にブロックしていた。この呼び出しは`CommandRegistrar.kt`の`/archive`（Brigadierコマンドディスパッチ）と`DeathCountdown.kt`の`handleBossKill()`（`LivingDeathEvent`ハンドラ）の2箇所から行われ、**どちらもサーバーのメインスレッド上**で発生する。ブロック中はTPSが停止し他コマンドも処理されない実害が`/archive`側で実機で見つかっている（`specification.md` 3.2節「`archive-rejected`の追加経緯」）。`handleBossKill()`側は同種のバグ報告こそ無かったが、同じブロッキング呼び出しを経由している以上、構造的には同じ問題を抱えていた。
 
 ### 方針：send-and-forget化＋コールバック
 
-`TcpGateConnection`を「送って`future.get()`で待つ」実装から、「送って、応答（`archive-complete`/`archive-rejected`、`requestId`相関）を受信したreaderスレッドが登録済みのコールバックを直接呼ぶ」実装に変える。タイムアウトも`future.get(timeout)`ではなく、送信時に別途スケジュールし、応答到着とタイムアウト発火のどちらが先でも二重発火しないようにする（既存の「`requestId`をキーに一度だけ取り出して処理する」パターンをそのまま踏襲する）。
+`TcpGateConnection`を「送って`future.get()`で待つ」実装から、「送って、応答（`archive-complete`/`archive-rejected`、`requestId`相関）を受信したreaderスレッドが登録済みのコールバックを直接呼ぶ」実装に変えた。タイムアウトも`future.get(timeout)`ではなく、送信時に別途スケジュールし、応答到着とタイムアウト発火のどちらが先でも二重発火しないようにしている（既存の「`requestId`をキーに一度だけ取り出して処理する」パターンをそのまま踏襲）。
 
 **「デッドロックの教訓」（下記「設計判断まとめ」参照）の遵守**：readerスレッドはコールバックを直接呼ぶが、コールバック自体はメインスレッドへ処理を委譲するだけで即座に返り、readerスレッド上で何かを待つことは一切しない。
 
@@ -358,7 +358,7 @@ class FileRecordRepository(private val dir: Path) : RecordRepository
 
 Gateへ一度も接続できていない、または接続済み後にreaderスレッドが切断を検知した状態（`TcpGateConnection`が接続用ソケット・書き込み用ストリームを持っていない状態）で`archive-request`を送ろうとした場合、実際にはメッセージは送信されずログに警告を出して捨てられるだけになる（既存の送信処理の挙動）。ところがこれまでの実装は、送信できたかどうかを一切見ずに無条件で応答を待つため、**応答が絶対に届かないと分かっている状況でも、律儀に60秒間待ってからタイムアウト扱いにする**。同期実装ではこれがそのままメインスレッドの60秒フリーズになり、非同期化後も、後述のFIFOキューが「直前のリクエストの応答を待ってから次へ進む」直列化をしている都合上、**未接続の間はキューに溜まったリクエスト1件ごとに60秒ずつ浪費してから次に進む**という形で問題が残る。
 
-これを避けるため、送信時点で未接続と分かっている場合は、実際の送信もタイムアウトのスケジュールも行わず、その場（呼び出し元と同じくメインスレッド上）で即座に失敗として扱う。応答を実際に待った上でのタイムアウトと、そもそも送っていない未接続とはOPへ伝えるべき内容が異なる（前者は「Manager側が処理に手間取っている可能性がある」、後者は「Gate接続そのものが切れている」）ため、`ArchiveResult`に両者を区別する新しいケース（未接続を表す値）を追加し、`CommandRegistrar`はこれを受けて「Gateに接続されていません」といった趣旨のメッセージを表示する。接続状態の判定は`TcpGateConnection`が既に持っているソケット・書き込みストリームの有無で足り、新しい状態変数を追加する必要は無い。
+これを避けるため、送信時点で未接続と分かっている場合は、実際の送信もタイムアウトのスケジュールも行わず、その場（呼び出し元と同じくメインスレッド上）で即座に失敗として扱う。応答を実際に待った上でのタイムアウトと、そもそも送っていない未接続とはOPへ伝えるべき内容が異なる（前者は「Manager側が処理に手間取っている可能性がある」、後者は「Gate接続そのものが切れている」）ため、`ArchiveResult`に両者を区別する新しいケース（`NotConnected`）を追加し、`CommandRegistrar`はこれを受けて「Gateに接続されていません」といった趣旨のメッセージを表示する。接続状態の判定は`TcpGateConnection`が既に持っているソケット・書き込みストリームの有無で足り、新しい状態変数の追加は不要だった。
 
 この対応により、同期実装で既に起きている「未接続時に60秒フリーズする」問題自体も解消される（非同期化を待たずに直せる部分だが、非同期化と合わせて設計・実装するのが自然なため、ここにまとめて設計した）。なお`ready`・`running-changed`は応答を伴わない一方向の通知であり、そもそも待ち合わせが発生しないため、この設計の対象外である。
 
@@ -408,8 +408,4 @@ Gateへ一度も接続できていない、または接続済み後にreaderス�
 
 ## 実装済み
 
-上記構成は`hardcoretogether/src/main/kotlin/com/ray/light/hardcoretogether/`に実装済み（`compileKotlin`で検証済み）。`port.ChallengeState`・`RecordService`/`ArchiveService`のシグネチャ、`HardcoreTogether`/`Runtime`での配線コードも確定・実装済み。`/archive`は`CommandRegistrar.kt`がhardcore MODの直接コマンドとして登録し、`/savedata`・`/senpan`はhardcore MOD側には一切存在しない（Gate側の実装に完全移譲）。
-
-## 未着手・既知の課題
-
-- 【設計済み・実装未反映】`CommandRegistrar.kt`の`/archive`実装がサーバーのメインスレッドで`archive-complete`受信まで同期的にブロックする点（`TcpGateConnection.sendArchiveRequestAndAwait`の`future.get(60, SECONDS)`）を、send-and-forget＋コールバック方式へ非同期化する設計を確定した（本ページ「`/archive`アーカイブ経路の非同期化」節）。あわせて、`DeathCountdown.kt`の自動アーカイブ（ボスキル）経路も同じ`ArchiveGateway.archive()`を経由するため同時に非同期化する。実装時の要点：①readerスレッドから直接コールバックを呼ぶが、コールバックは`server.execute{}`へ委譲するだけに留め「デッドロックの教訓」に抵触しないこと、②`ArchiveGatewayImpl`にFIFOキューを持たせ、`save-off`だけでなく`save-all flush`自体もリクエスト間で直列化すること（先発の`archive-request`をManagerがまだコピー中の可能性がある間に後発が無条件で`save-all flush`を発行すると、それだけで歪んだアーカイブを作りうるため）、③未接続時（送信時点で未接続／送信後に接続が切れた場合の両方）は応答を待たず即座に失敗として扱い、タイムアウト検出用スレッドも接続断検知時に保留中リクエストを解決してから止めること
+上記構成は`hardcoretogether/src/main/kotlin/com/ray/light/hardcoretogether/`に実装済み（`compileKotlin`で検証済み）。`port.ChallengeState`・`RecordService`/`ArchiveService`のシグネチャ、`HardcoreTogether`/`Runtime`での配線コードも確定・実装済み。`/archive`は`CommandRegistrar.kt`がhardcore MODの直接コマンドとして登録し、`/savedata`・`/senpan`はhardcore MOD側には一切存在しない（Gate側の実装に完全移譲）。「`/archive`アーカイブ経路の非同期化」節の設計（`TcpGateConnection`のsend-and-forget化、未接続時のfast-fail、接続断時のタイムアウト検出用スレッドの後始末、`ArchiveGatewayImpl`のFIFOキューによるflush直列化）も実装済み。ワイヤプロトコル自体に変更は無いMOD内部実装のみの変更のため、Manager（Go）側の対応は不要。
